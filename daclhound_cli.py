@@ -230,7 +230,7 @@ def int_attr(entry: dict[str, Any], name: str) -> int | None:
         return None
 
 
-def adcs_enrollers(entry: dict[str, Any]) -> set[str]:
+def adcs_enrollers(entry: dict[str, Any], *, include_common: bool = False) -> set[str]:
     """Return trustees with an allow enrollment ACE or full control on an ADCS object."""
     descriptor = attr(entry, "nTSecurityDescriptor", {}) or {}
     if isinstance(descriptor, list):
@@ -247,7 +247,10 @@ def adcs_enrollers(entry: dict[str, Any]) -> set[str]:
             token in object_type for token in ("certificate-enrollment", "enroll", "all-extended-rights")
         )
         if enroll_right or "GENERIC_ALL" in rights:
-            result.update(t.casefold() for t in trustees(ace.get("Trustee")) if not adcs_common_principal(t))
+            result.update(
+                t.casefold() for t in trustees(ace.get("Trustee"))
+                if include_common or not adcs_common_principal(t)
+            )
     return result
 
 
@@ -354,7 +357,6 @@ def adcs_assessment(entries: list[dict[str, Any]], edges: list[dict[str, Any]]) 
             scoped_write = "WRITE_PROP" in rights and "msds-oidtogrouplink" in scope.casefold().replace("_", "-")
             pki_write |= broad_write or scoped_write
     no_security_ext = any((int_attr(t, "msPKI-Enrollment-Flag") or 0) & 0x80000 for t in templates)
-    oid_group_link = any(attr(o, "msDS-OIDToGroupLink") for o in pki_objects)
     explicit_mapping = any(attr(e, "altSecurityIdentities") for e in entries)
     v1_subject_template = any(
         int_attr(t, "msPKI-Template-Schema-Version") == 1
@@ -408,7 +410,9 @@ def adcs_assessment(entries: list[dict[str, Any]], edges: list[dict[str, Any]]) 
         "ESC10": False,
         "ESC11": False,
         "ESC12": False,
-        "ESC13": oid_group_link,
+        # Match the graph: a linked policy OID alone is not an ESC13 finding.
+        # The chain must pass template, CA publication, NTAuth and enrollment checks.
+        "ESC13": "ESC13" in candidates,
         "ESC14": explicit_mapping,
         "ESC15": v1_subject_template,
         "ESC16": False,
@@ -837,14 +841,16 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
         source = principal_node(principal)
         add_finding(source, esc, item, ca, source, nodes_by_id[source]["name"], False, evidence, is_acl)
 
-    def published_enrollers(template: dict[str, Any]) -> list[tuple[dict[str, Any], set[str]]]:
+    def published_enrollers(template: dict[str, Any], *, include_common: bool = False) -> list[tuple[dict[str, Any], set[str]]]:
         cn = scalar(attr(template, "cn")).casefold()
         result = []
         for ca in cas:
             raw_names = attr(ca, "certificateTemplates", []) or []
             names = {scalar(value).casefold() for value in (raw_names if isinstance(raw_names, list) else [raw_names])}
             if cn in names:
-                principals = ca_effective_enrollers(ca, adcs_enrollers(template))
+                principals = ca_effective_enrollers(
+                    ca, adcs_enrollers(template, include_common=include_common)
+                )
                 if principals:
                     result.append((ca, principals))
         return result
@@ -964,7 +970,10 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
             group_id = group_id or principal_node(group_dn)
             group_node = nodes_by_id[group_id]
             eligible_cas: list[tuple[dict[str, Any], set[str]]] = []
-            for ca, principals in published_enrollers(template):
+            # ESC13 depends on every principal that can enroll. Broad groups
+            # (for example Domain Users) are often the actual attack entrypoint,
+            # so keep them for eligibility and render the resulting ESC edge.
+            for ca, principals in published_enrollers(template, include_common=True):
                 ca_fps = adcs_cert_fingerprints([ca], "ca")
                 if not ca_fps or not ntauth.intersection(ca_fps):
                     continue
@@ -973,8 +982,7 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
                 continue
             template_id = template_ids[id(template)]
             template_node = nodes_by_id[template_id]
-            enrollers = sorted({principal for _, principals in eligible_cas for principal in principals
-                                if not adcs_common_principal(principal)})
+            enrollers = sorted({principal for _, principals in eligible_cas for principal in principals})
             if not enrollers:
                 continue
             ca_names = sorted({adcs_name(ca) for ca, _ in eligible_cas})
