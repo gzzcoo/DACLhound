@@ -19,6 +19,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+__version__ = "0.1.6"
+
 
 def ensure_bloodyad_available() -> None:
     """Require bloodyAD as an installed Python library, never as a subprocess."""
@@ -1137,12 +1139,15 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                                    if scalar(value).strip()]
         admin_count = scalar(attr(entry, "adminCount")).strip().casefold() in {"1", "true"}
         no_preauth = bool({"DONT_REQ_PREAUTH", "DONT_REQUIRE_PREAUTH"} & uac_flags)
+        members = entry.get("member", [])
+        if kind == "group" and (sam or name).casefold() in {"domain users", "enterprise admins"}:
+            members = []
         nodes.append({"id": node_id, "name": name, "type": kind, "dn": dn,
                       "sid": scalar(entry.get("objectSid")), "owner": scalar(descriptor.get("Owner")),
                       "sidHistory": [sid for value in sid_history
                                      for sid in [canonical_sid(value)] if sid],
                       "control": scalar(descriptor.get("Control")),
-                      "memberOf": entry.get("memberOf", []), "members": entry.get("member", []),
+                      "memberOf": entry.get("memberOf", []), "members": members,
                       "dNSHostName": scalar(attr(entry, "dNSHostName")),
                       "primaryGroupID": scalar(entry.get("primaryGroupID")),
                       "samAccountName": sam, "displayName": display_name,
@@ -1358,6 +1363,9 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
         member, group = node_by_id.get(member_id), node_by_id.get(group_id)
         if not member or not group or group.get("type") != "group":
             return
+        group_name = (scalar(group.get("samAccountName")) or scalar(group.get("name"))).casefold()
+        if group_name in {"domain users", "enterprise admins"}:
+            return
         membership_pairs.add((member_id, group_id))
         edges.append({"id": f"member::{member_id}::{group_id}", "kind": "membership",
                       "source": member_id, "target": group_id,
@@ -1515,6 +1523,7 @@ def _stop_graph_server(bind: str, port: int) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect Active Directory DACLs or serve an interactive graph.")
+    parser.add_argument("--version", action="version", version=f"DACLhound {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     ap = commands.add_parser(
         "collect", description="Read-only Active Directory DACL collector powered by bloodyAD.",
