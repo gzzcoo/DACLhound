@@ -26,6 +26,28 @@ def ensure_bloodyad_available() -> None:
         raise RuntimeError("bloodyAD Python package is missing; activate the project venv and install requirements.txt")
 
 
+def patch_badldap_rfc4515_compat() -> None:
+    """Fix badldap's escaped-filter decoder on Python 3.10 (int.to_bytes needs length)."""
+    from badldap.protocol import query as badldap_query
+
+    def rfc4515_encode(value: str) -> bytes:
+        i = 0
+        byte_str = bytearray()
+        while i < len(value):
+            if value[i] == "\\" and i < len(value) - 2:
+                try:
+                    byte_str.append(int(value[i + 1 : i + 3], 16))
+                    i += 2
+                except ValueError:
+                    byte_str.extend(b"\\")
+            else:
+                byte_str.extend(value[i].encode())
+            i += 1
+        return bytes(byte_str)
+
+    badldap_query.rfc4515_encode = rfc4515_encode
+
+
 def json_value(value: Any) -> Any:
     """Match bloodyAD's JSON conversion for values returned by its search renderer."""
     if isinstance(value, dict):
@@ -51,6 +73,7 @@ async def collect_with_bloodyad(
     kerberos: bool = False,
     auth_format: str = "",
 ) -> list[dict[str, Any]]:
+    patch_badldap_rfc4515_compat()
     from bloodyAD.cli_modules.get import search as bloodyad_search
     from bloodyAD.exceptions import NoResultError
     from bloodyAD.network.config import Config, ConnectionHandler
