@@ -19,7 +19,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 
 def ensure_bloodyad_available() -> None:
@@ -291,6 +291,21 @@ def adcs_common_principal(value: str) -> bool:
         principal in COMMON_ADCS_PRINCIPALS
         or re.fullmatch(r"s-1-5-21-(?:\d+-){3}(?:498|512|513|514|515|516|518|519|520|521|526|527|553)", principal)
         or re.fullmatch(r"s-1-5-(?:18|19|20|32-(?:544|548|549|550|551|552|554|555|556|557|558|559|560|562|568|569|573|574|575|576|577|578|579|580|581|582|583|584|585|586|587|588|589|590|591|592|593|594|595|596|597|598|599))", principal)
+        for principal in principals
+    )
+
+
+def adcs_default_admin_principal(value: str) -> bool:
+    """Exclude built-in domain admin groups from actionable ESC13 graph edges."""
+    principals = [part.strip().casefold().split("\\")[-1]
+                  for part in re.split(r"[;|]", value) if part.strip()]
+    return bool(principals) and all(
+        principal in {
+            "domain admins", "enterprise admins", "schema admins",
+            "administrators", "builtin_administrators", "builtin administrators",
+        }
+        or re.fullmatch(r"s-1-5-21-(?:\d+-){3}(?:512|518|519)", principal)
+        or principal == "s-1-5-32-544"
         for principal in principals
     )
 
@@ -987,7 +1002,11 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
                 continue
             template_id = template_ids[id(template)]
             template_node = nodes_by_id[template_id]
-            enrollers = sorted({principal for _, principals in eligible_cas for principal in principals})
+            # Admin-only enrollment ACEs are standard delegation noise. They
+            # remain available in the raw DACL data, but should not become an
+            # ESC13 entrypoint in the graph.
+            enrollers = sorted({principal for _, principals in eligible_cas for principal in principals
+                                if not adcs_default_admin_principal(principal)})
             if not enrollers:
                 continue
             ca_names = sorted({adcs_name(ca) for ca, _ in eligible_cas})
