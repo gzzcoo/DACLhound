@@ -10,7 +10,7 @@ Unlike BloodHound CE's modeled graph edges, DACLhound preserves the collected DA
 
 ## Demo
 
-https://github.com/user-attachments/assets/d48a7b61-928c-467a-b9c5-1e7cc3a0ff6e
+https://github.com/user-attachments/assets/06d60c32-a3a0-4773-8ddf-86e0b5aa1485
 
 The demo walks through collecting a domain and opening the graph viewer. It also shows selecting an object to focus on its permission paths, hiding objects, and setting start and end nodes to reveal a path.
 
