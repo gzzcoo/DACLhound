@@ -6,7 +6,7 @@ It is primarily intended for Hack The Box (HTB) and similar hands-on labs, and w
 
 Unlike BloodHound CE's modeled graph edges, DACLhound preserves the collected DACL details and exposes individual `Write-Property` rights by attribute (for example, `WriteLogonHours` or `WriteUserAccountControl`, etc.). This helps inspect the specific property and ACE behind a relationship.
 
-![DACLhound graph example](DACLhound/DACLhound.png)
+![DACLhound graph example](https://raw.githubusercontent.com/gzzcoo/DACLhound/main/DACLhound/DACLhound.png)
 
 ## Install
 
