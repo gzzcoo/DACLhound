@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "DACLhound"
+version = "0.1.1"
+description = "Collect Active Directory DACLs and explore them in an interactive graph"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = ["bloodyAD==2.5.5"]
+keywords = ["active-directory", "acl", "dacl", "bloodhound", "security"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Information Technology",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+]
+
+[project.scripts]
+"DACLhound.py" = "daclhound_cli:entrypoint"
+daclhound = "daclhound_cli:entrypoint"
+
+[tool.setuptools]
+py-modules = ["daclhound_cli", "daclgraph_server"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["daclhound_assets"]
+
+[tool.setuptools.package-data]
+daclhound_assets = ["viewer.html"]

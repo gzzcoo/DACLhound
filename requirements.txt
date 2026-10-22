@@ -1,0 +1,21 @@
+# bloodyAD is used as a Python library; the collector does not execute its CLI.
+bloodyAD==2.5.5
+asn1crypto==1.5.1
+asysocks==0.2.18
+badauth==0.1.6
+badldap==0.7.6
+cffi==2.1.1
+cryptography==44.0.2
+dnspython==2.8.0
+h11==0.16.0
+kerbad==0.5.11
+prompt_toolkit==3.0.53
+pycparser==3.0
+pycryptodomex==3.23.0
+six==1.17.0
+tabulate==0.10.0
+tqdm==4.70.0
+unicrypto==0.0.12
+unidns==0.0.4
+wcwidth==0.8.2
+winacl==0.1.9
