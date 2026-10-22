@@ -2,6 +2,12 @@
 
 DACLhound collects Active Directory security descriptors over LDAP and turns the results into a graph you can inspect in a browser. The collector uses bloodyAD as a Python library; it does not run the `bloodyAD` command.
 
+It is primarily intended for Hack The Box (HTB) and similar hands-on labs, and works best with lab-sized or otherwise moderate Active Directory environments. It is not designed or performance-tested for very large enterprise domains.
+
+Unlike BloodHound CE's modeled graph edges, DACLhound preserves the collected DACL details and exposes individual `Write-Property` rights by attribute (for example, `WriteLogonHours` or `WriteUserAccountControl`). This helps inspect the specific property and ACE behind a relationship.
+
+![DACLhound graph example](DACLhound/DACLhound.png)
+
 ## Install
 
 Python 3.10 or newer is required.
