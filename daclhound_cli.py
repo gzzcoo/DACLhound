@@ -243,8 +243,11 @@ def adcs_enrollers(entry: dict[str, Any], *, include_common: bool = False) -> se
             continue
         rights = {part.strip().upper() for part in scalar(ace.get("Right")).split("|")}
         object_type = scalar(ace.get("ObjectType")).casefold().replace("_", "-")
-        enroll_right = "CONTROL_ACCESS" in rights and any(
-            token in object_type for token in ("certificate-enrollment", "enroll", "all-extended-rights")
+        enroll_right = (
+            "CONTROL_ACCESS" in rights
+            and any(token in object_type for token in ("certificate-enrollment", "enroll", "all-extended-rights"))
+        ) or (
+            "WRITE_PROP" in rights and "certificate-enrollment" in object_type
         )
         if enroll_right or "GENERIC_ALL" in rights:
             result.update(
