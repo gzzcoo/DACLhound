@@ -8,6 +8,12 @@ Unlike BloodHound CE's modeled graph edges, DACLhound preserves the collected DA
 
 ![DACLhound graph example](https://raw.githubusercontent.com/gzzcoo/DACLhound/main/DACLhound/DACLhound.png)
 
+## Demo
+
+[![Watch the DACLhound demo](DACLhound/DACLhound.png)](DACLhound/content/daclhound.mp4)
+
+The demo walks through collecting a domain and opening the graph viewer. It also shows selecting an object to focus on its permission paths, hiding objects, and setting start and end nodes to reveal a path.
+
 ## Install
 
 Python 3.10 or newer is required.
