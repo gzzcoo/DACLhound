@@ -1,5 +1,6 @@
 # bloodyAD is used as a Python library; the collector does not execute its CLI.
 bloodyAD==2.5.5
+impacket==0.13.1
 asn1crypto==1.5.1
 asysocks==0.2.18
 badauth==0.1.6

@@ -1,6 +1,6 @@
 # DACLhound
 
-DACLhound collects Active Directory security descriptors over LDAP and turns the results into a graph you can inspect in a browser. The collector uses bloodyAD as a Python library; it does not run the `bloodyAD` command.
+DACLhound collects Active Directory security descriptors over LDAP and turns the results into a graph you can inspect in a browser. The collector uses bloodyAD as a Python library; it does not run the `bloodyAD` command. Impacket's Python library handles password-based Kerberos TGT requests, passing the ticket in memory to bloodyAD.
 
 It is primarily intended for Hack The Box (HTB) and similar hands-on labs, and works best with lab-sized or otherwise moderate Active Directory environments. It is not designed or performance-tested for very large enterprise domains.
 

@@ -19,7 +19,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.1.11"
+__version__ = "0.1.13"
 
 
 def ensure_bloodyad_available() -> None:
@@ -48,6 +48,68 @@ def patch_badldap_rfc4515_compat() -> None:
         return bytes(byte_str)
 
     badldap_query.rfc4515_encode = rfc4515_encode
+
+
+def request_tgt_ccache_hex(username: str, domain: str, password: str, kdc_host: str) -> str:
+    """Request a TGT with Impacket and return its ccache as hex for bloodyAD.
+
+    Impacket first asks the KDC for its pre-authentication salt. This supports
+    accounts whose AES salt differs from kerbad's default realm+username salt.
+    The ccache stays in memory and is passed to bloodyAD's Python API.
+    """
+    from impacket.krb5 import constants
+    from impacket.krb5.ccache import CCache
+    from impacket.krb5.kerberosv5 import getKerberosTGT
+    from impacket.krb5.types import Principal
+
+    principal = Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+    tgt, _cipher, old_session_key, session_key = getKerberosTGT(
+        clientName=principal,
+        password=password,
+        domain=domain.upper(),
+        lmhash=b"",
+        nthash=b"",
+        aesKey=None,
+        kdcHost=kdc_host,
+    )
+    ccache = CCache()
+    ccache.fromTGT(tgt, old_session_key, session_key)
+    return ccache.getData().hex()
+
+
+def kerberos_kdc_for_user_realm(domain: str, target_host: str, target_dc_ip: str | None) -> str:
+    """Find a KDC in the credential realm, which may differ from the LDAP DC."""
+    realm = domain.rstrip(".").lower()
+    target = target_host.rstrip(".").lower()
+    if target == realm or target.endswith("." + realm):
+        return target_dc_ip or target_host
+
+    source_fqdn = os.environ.get("FQDN", "").rstrip(".")
+    if source_fqdn and (source_fqdn.lower() == realm or source_fqdn.lower().endswith("." + realm)):
+        return os.environ.get("DC_IP") or source_fqdn
+
+    try:
+        import dns.resolver
+        for query in (f"_kerberos._tcp.dc._msdcs.{domain}", f"_kerberos._tcp.{domain}"):
+            try:
+                records = dns.resolver.resolve(query, "SRV")
+            except Exception:
+                continue
+            ordered = sorted(records, key=lambda item: (item.priority, -item.weight, str(item.target)))
+            if ordered:
+                return str(ordered[0].target).rstrip(".")
+    except ImportError:
+        pass
+
+    try:
+        import socket
+        socket.gethostbyname(domain)
+        return domain
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not locate a KDC for credential realm {domain} while targeting {target_host}. "
+            "Set FQDN and DC_IP to a DC in the credential realm, or use an existing ccache with -k."
+        ) from exc
 
 
 def json_value(value: Any) -> Any:
@@ -80,10 +142,18 @@ async def collect_with_bloodyad(
     from bloodyAD.exceptions import NoResultError
     from bloodyAD.network.config import Config, ConnectionHandler
 
-    krb_args = ([f"ccache={kerberos_ticket}"] if kerberos_ticket else []) if kerberos else None
-    config = Config(host=host, domain=domain, username=username or "", password=password or "",
+    memory_ccache_hex = None
+    if kerberos and password and not kerberos_ticket and not auth_format:
+        credential_kdc = kerberos_kdc_for_user_realm(domain, host, dc_ip)
+        memory_ccache_hex = request_tgt_ccache_hex(username or "", domain, password, credential_kdc)
+
+    krb_args = ([f"ccache={memory_ccache_hex}"] if memory_ccache_hex else
+                [f"ccache={kerberos_ticket}"] if kerberos_ticket else []) if kerberos else None
+    config = Config(host=host, domain=domain, username=username or "",
+                    password="" if memory_ccache_hex else (password or ""),
                     krb_args=krb_args, dcip=dc_ip or "", timeout=timeout,
-                    scheme="ldaps" if secure else "ldap", format=auth_format)
+                    scheme="ldaps" if secure else "ldap",
+                    format="hex" if memory_ccache_hex else auth_format)
     conn = ConnectionHandler(config=config)
     entries: list[dict[str, Any]] = []
     try:
