@@ -19,7 +19,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.1.17"
+__version__ = "0.1.18"
 
 
 def ensure_bloodyad_available() -> None:
@@ -666,6 +666,17 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
                     return node
         return None
 
+    def is_domain_controller(node: dict[str, Any]) -> bool:
+        if scalar(node.get("primaryGroupID")).strip() == "516":
+            return True
+        flags = node.get("userAccountControl", []) or []
+        if isinstance(flags, str):
+            flags = re.split(r"[;|,]", flags)
+        if any(scalar(flag).strip().upper() == "SERVER_TRUST_ACCOUNT" for flag in flags):
+            return True
+        return bool(re.search(r"(?:^|,)OU=Domain Controllers(?:,|$)",
+                              scalar(node.get("dn")), re.IGNORECASE))
+
     def is_ca_host_principal(principal: str, ca: dict[str, Any]) -> bool:
         node = ca_host_node(ca)
         if not node:
@@ -969,7 +980,10 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
 
     for ca in cas:
         host_node = ca_host_node(ca)
-        if host_node:
+        # Treat host compromise as a separate ESC5 candidate only for a
+        # dedicated CA server; a DC-hosted CA is not a useful extra graph hop.
+        # ACL-derived ESC5 findings on the CA and PKI objects remain evaluated.
+        if host_node and not is_domain_controller(host_node):
             host_principal = scalar(host_node.get("samAccountName")) or scalar(host_node.get("name"))
             emit_indicator(
                 "ESC5", ca, host_principal,
