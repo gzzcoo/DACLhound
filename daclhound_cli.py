@@ -19,7 +19,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.1.16"
+__version__ = "0.1.17"
 
 
 def ensure_bloodyad_available() -> None:
