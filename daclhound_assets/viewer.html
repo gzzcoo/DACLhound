@@ -497,6 +497,7 @@ function visualFocus(){
   const membershipByMember=new Map(),controlsByPrincipal=new Map();
   for(const edge of visibleEdges){if(edge.kind==='membership'){if(!membershipByMember.has(edge.source))membershipByMember.set(edge.source,[]);membershipByMember.get(edge.source).push(edge)}else if(!(edge.type||'').toUpperCase().includes('DENIED')){if(!controlsByPrincipal.has(edge.source))controlsByPrincipal.set(edge.source,[]);controlsByPrincipal.get(edge.source).push(edge)}}
   const queue=[selectedNode.id],visited=new Set(queue);nodeIds.add(selectedNode.id);
+  if(selectedNode.type==='group'){for(const edge of data.edges){if(edge.kind!=='membership'||edge.target!==selectedNode.id||hiddenObjectIds.has(edge.source))continue;nodeIds.add(edge.source);if(visibleEdges.some(visible=>visible.id===edge.id))edgeIds.add(edge.id)}}
   while(queue.length){const principalId=queue.shift();for(const edge of membershipByMember.get(principalId)||[]){const group=data.nodes.find(n=>n.id===edge.target);if(group?.type!=='group')continue;edgeIds.add(edge.id);nodeIds.add(group.id);if(!visited.has(group.id)){visited.add(group.id);queue.push(group.id)}}for(const edge of controlsByPrincipal.get(principalId)||[]){edgeIds.add(edge.id);nodeIds.add(edge.source);nodeIds.add(edge.target);const target=data.nodes.find(n=>n.id===edge.target);if(target&&['user','group','computer'].includes(target.type)&&!visited.has(target.id)){visited.add(target.id);queue.push(target.id)}}}
   return {active:true,nodeIds,edgeIds};
  }
