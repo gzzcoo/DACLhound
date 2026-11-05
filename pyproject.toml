@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "DACLhound"
-version = "0.1.22"
+version = "0.1.23"
 description = "Collect Active Directory DACLs and explore them in an interactive graph"
 readme = "README.md"
 license = "MIT"
@@ -33,7 +33,7 @@ py-modules = ["daclhound_cli", "daclgraph_server"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["daclhound_assets"]
+include = ["daclhound*", "daclhound_assets*"]
 
 [tool.setuptools.package-data]
 daclhound_assets = ["viewer.html"]
