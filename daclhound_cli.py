@@ -19,7 +19,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.1.19"
+__version__ = "0.1.21"
 
 
 def ensure_bloodyad_available() -> None:
@@ -1336,6 +1336,7 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
     # stores many service SPNs on one computer, so they must share one edge.
     spn_owner: dict[str, str] = {}
     host_owner: dict[str, str] = {}
+    host_owners: dict[str, set[str]] = {}
     for node in nodes:
         entry = entries_by_node_id.get(node["id"], {})
         spns = attr(entry, "servicePrincipalName", []) or []
@@ -1352,6 +1353,8 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                 if normalized_host:
                     host_owner[normalized_host] = node["id"]
                     host_owner.setdefault(normalized_host.split(".", 1)[0], node["id"])
+                    host_owners.setdefault(normalized_host, set()).add(node["id"])
+                    host_owners.setdefault(normalized_host.split(".", 1)[0], set()).add(node["id"])
     for edge in edges:
         trustee = edge["source"]
         normalized_trustee = trustee.casefold().split("\\")[-1]
@@ -1370,6 +1373,56 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
         nodes.append({"id": node_id, "name": trustee, "type": "trustee", "dn": "", "sid": "",
                       "owner": "", "control": "", "memberOf": []})
     node_by_id = {node["id"]: node for node in nodes}
+    # RustHound-CE derives SQLAdmin from MSSQLSvc SPNs in LDAP. Mirror that
+    # behavior without claiming that SQL Server roles were queried or verified.
+    sql_targets: dict[tuple[str, str], dict[str, Any]] = {}
+    for principal in nodes:
+        if principal["type"] not in {"user", "computer"}:
+            continue
+        entry = entries_by_node_id.get(principal["id"], {})
+        spns = attr(entry, "servicePrincipalName", []) or []
+        if isinstance(spns, str):
+            spns = [spns]
+        for raw_spn in spns:
+            spn = scalar(raw_spn).strip()
+            parts = spn.split("/", 1)
+            if len(parts) != 2 or parts[0].casefold() != "mssqlsvc":
+                continue
+            # MSSQLSvc SPNs commonly use host:port or host:instance.
+            endpoint = parts[1].split("/", 1)[0].strip().rstrip(".")
+            host, _, port_or_instance = endpoint.partition(":")
+            host_key = host.casefold().rstrip(".")
+            if not host_key:
+                continue
+            candidates = host_owners.get(host_key, set())
+            target_id = next(iter(candidates)) if len(candidates) == 1 else None
+            if target_id is None:
+                # Preserve the LDAP evidence when no unique Computer object
+                # can be resolved, rather than linking to the wrong forest.
+                target_id = f"sqlservice::{host_key}"
+                if target_id not in node_by_id:
+                    service_node = {"id": target_id, "name": host, "type": "service", "dn": "",
+                                    "sid": "", "owner": "", "control": "", "memberOf": [],
+                                    "servicePrincipalName": spn}
+                    nodes.append(service_node)
+                    node_by_id[target_id] = service_node
+            key = (principal["id"], target_id)
+            item = sql_targets.setdefault(key, {"spns": [], "endpoints": []})
+            if spn not in item["spns"]:
+                item["spns"].append(spn)
+            port_value = port_or_instance or "1433"
+            endpoint_detail = {"host": host, "portOrInstance": port_value, "spn": spn}
+            if endpoint_detail not in item["endpoints"]:
+                item["endpoints"].append(endpoint_detail)
+    for (principal_id, target_id), details in sql_targets.items():
+        principal, target_node = node_by_id[principal_id], node_by_id[target_id]
+        edges.append({"id": f"sql-admin::{principal_id}::{target_id}", "kind": "sql_admin",
+                      "source": principal_id, "target": target_id,
+                      "sourceName": principal["name"], "sourceType": principal["type"],
+                      "targetName": target_node["name"], "targetType": target_node["type"],
+                      "right": "SQLAdmin", "objectType": "MSSQLSvc",
+                      "serviceSPNs": details["spns"], "sqlEndpoints": details["endpoints"],
+                      "isACL": False, "inherited": False})
     service_ids: dict[str, str] = {}
     # Group constrained-delegation SPNs by account and target. Keep the graph
     # readable while preserving every SPN on the relationship for its details.
