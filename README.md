@@ -35,13 +35,13 @@ pipx upgrade DACLhound
 ## Collect a graph
 
 ```sh
-DACLhound.py collect --host "$FQDN" -d "$DOMAIN" -u 'user' -p 'password' --dc-ip "$IP" --output "$DOMAIN.json"
+DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p 'password' --dc-ip $IP --output $DOMAIN.json
 ```
 
 The collector is read-only. By default it collects users, groups, computers, OUs, containers, GPOs, the domain, and ADCS data. Use `--types` to limit directory object types:
 
 ```sh
-DACLhound.py collect --host "$FQDN" -d "$DOMAIN" -u 'user' -p 'password' --types users,groups --output users-and-groups.json
+DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p 'password' --types users,groups --output users-and-groups.json
 ```
 
 Use `--no-adcs` to skip ADCS collection. The normalized graph is written to `--output`. Add `--raw-output` to keep the bloodyAD response as well.
@@ -51,7 +51,7 @@ Use `--no-adcs` to skip ADCS collection. The normalized graph is written to `--o
 ### NTLM password
 
 ```sh
-DACLhound.py collect --host "$FQDN" -d "$DOMAIN" -u 'user' -p 'password' --dc-ip "$IP" -o "$DOMAIN.json"
+DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p 'password' --dc-ip $IP -o $DOMAIN.json
 ```
 
 ### NTLM pass-the-hash
@@ -59,7 +59,7 @@ DACLhound.py collect --host "$FQDN" -d "$DOMAIN" -u 'user' -p 'password' --dc-ip
 Use `LMHASH:NTHASH`; if you only have the NT hash, leave the LM field empty:
 
 ```sh
-DACLhound.py collect --host "$FQDN" -d "$DOMAIN" -u 'user' -hashes ':<NTHASH>' --dc-ip "$IP" -o "$DOMAIN.json"
+DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -hashes ':<NTHASH>' --dc-ip $IP -o $DOMAIN.json
 ```
 
 ### Kerberos
@@ -71,13 +71,13 @@ an explicit flag for ccache authentication.
 **Password:**
 
 ```sh
-DACLhound.py collect --host "$FQDN" -d "$DOMAIN" -u 'user' -p '<password>' -k --dc-ip "$IP" -o "$DOMAIN.json"
+DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p '<password>' -k --dc-ip $IP -o $DOMAIN.json
 ```
 
 **Pass-the-hash (NT hash used as the Kerberos RC4 key):**
 
 ```sh
-DACLhound.py collect --host "$FQDN" -d "$DOMAIN" -u 'user' -hashes '<LMHASH>:<NTHASH>' -k --dc-ip "$IP" -o "$DOMAIN.json"
+DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -hashes '<LMHASH>:<NTHASH>' -k --dc-ip $IP -o $DOMAIN.json
 ```
 
 If only the NT hash is available, use `-hashes '<NTHASH>'`.
@@ -86,10 +86,10 @@ If only the NT hash is available, use `-hashes '<NTHASH>'`.
 
 ```sh
 # Use the current KRB5CCNAME
-DACLhound.py collect --host "$FQDN" -d "$DOMAIN" -k -no-pass --dc-ip "$IP" -o "$DOMAIN.json"
+DACLhound.py collect --host $FQDN -d $DOMAIN -k -no-pass --dc-ip $IP -o DOMAIN.json
 
 # Or provide a ccache file directly
-DACLhound.py collect --host "$FQDN" -d "$DOMAIN" -k user.ccache -no-pass --dc-ip "$IP" -o "$DOMAIN.json"
+DACLhound.py collect --host $FQDN -d $DOMAIN -k user.ccache -no-pass --dc-ip $IP -o $DOMAIN.json
 ```
 
 An AES key enables Kerberos automatically: use `-aesKey '<AESKEY>'` (with `-u`). Add `-s` to use LDAPS.
@@ -99,13 +99,14 @@ An AES key enables Kerberos automatically: use `-aesKey '<AESKEY>'` (with `-u`).
 Run the viewer in the foreground and stop it with `Ctrl+C`:
 
 ```sh
-DACLhound.py graph --input "$DOMAIN.json"
+DACLhound.py graph --input $DOMAIN.json
 ```
 
 Or run it in the background:
 
 ```sh
-DACLhound.py graph start --input "$DOMAIN.json"
+DACLhound.py graph start
+DACLhound.py graph start --input $DOMAIN.json
 DACLhound.py graph status
 DACLhound.py graph stop
 ```
