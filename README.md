@@ -46,6 +46,8 @@ DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p 'password' --types use
 
 Use `--no-adcs` to skip ADCS collection. The normalized graph is written to `--output`. Add `--raw-output` to keep the bloodyAD response as well.
 
+LDAP visibility depends on the account used for collection. If you have multiple accounts with different directory permissions, collect the domain with each one; their results may reveal additional objects or ACLs. Load the resulting JSON files together in the graph viewer, or pass them together to `analyze` to combine their data.
+
 ## Analyze saved graphs
 
 Run a quick console triage of saved graphs without opening the web viewer. `analyze` reports domain context, Domain Admins, effective permission paths, Kerberos roasting, delegations, ADCS findings, trusts, and other useful relationships. You can analyze several domains together; duplicate objects and relationships are combined:
