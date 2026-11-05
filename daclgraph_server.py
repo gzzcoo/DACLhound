@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 VIEWER = files("daclhound_assets").joinpath("viewer.html")
-MAX_BODY = 64 * 1024 * 1024
+MAX_BODY = 256 * 1024 * 1024
 
 
 class DatasetStore:
@@ -90,12 +90,22 @@ def make_handler(store: DatasetStore, log_requests: bool = False):
             except ValueError:
                 length = 0
             if length <= 0 or length > MAX_BODY:
-                self.send_json(400, {"error": "Request body must be between 1 byte and 64 MiB"})
+                self.send_json(400, {"error": "Request body must be between 1 byte and 256 MiB"})
                 return
             try:
-                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                body = self.rfile.read(length)
+                payload = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 self.send_json(400, {"error": "Invalid JSON request body"})
+                return
+            upload_name = self.headers.get("X-DACLGraph-Name")
+            if upload_name:
+                try:
+                    item = store.add(unquote(upload_name), payload)
+                except ValueError as exc:
+                    self.send_json(400, {"error": str(exc)})
+                    return
+                self.send_json(201, {"key": item["key"], "name": item["name"]})
                 return
             if not isinstance(payload, dict):
                 self.send_json(400, {"error": "Expected an object containing name and data"})
