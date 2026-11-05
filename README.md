@@ -51,9 +51,9 @@ Use `--no-adcs` to skip ADCS collection. The normalized graph is written to `--o
 Run a quick console triage of saved graphs without opening the web viewer. `analyze` reports domain context, Domain Admins, effective permission paths, Kerberos roasting, delegations, ADCS findings, trusts, and other useful relationships. You can analyze several domains together; duplicate objects and relationships are combined:
 
 ```sh
-DACLhound.py analyze $DOMAIN.json
-DACLhound.py analyze ping.json pong.json
-DACLhound.py analyze $DOMAIN.json --from-user 'alice'
+DACLhound.py analyze result.json
+DACLhound.py analyze result.json result2.json
+DACLhound.py analyze result.json --from-user 'alice'
 ```
 
 By default, `analyze` traces effective permission paths from collected users, resolves trustees by SID across all supplied JSON files, and groups paths that share a trustee group. It also reports direct rights, domain membership, delegation, roasting, ADCS, and GPO link findings in prioritized sections. Use `--from-user` to focus the paths on one account. Output is colorized by default; use `--color never` to disable colors. This is a quick way to review findings from the terminal when you do not need the web viewer.
