@@ -14,7 +14,7 @@ DACLhound is still under active development. I plan to update it daily as I cont
 
 ## Demo
 
-https://github.com/user-attachments/assets/06d60c32-a3a0-4773-8ddf-86e0b5aa1485
+https://github.com/user-attachments/assets/62a531d9-c3f0-47d3-aab0-d7fef8db28d1
 
 The demo walks through collecting a domain and opening the graph viewer. It also shows selecting an object to focus on its permission paths, hiding objects, and setting start and end nodes to reveal a path.
 
