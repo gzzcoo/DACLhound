@@ -37,3 +37,4 @@ include = ["daclhound*", "daclhound_assets*"]
 
 [tool.setuptools.package-data]
 daclhound_assets = ["viewer.html"]
+daclhound = ["adws/THIRD_PARTY_LICENSES.txt", "adws/THIRD_PARTY_NOTICES.md"]

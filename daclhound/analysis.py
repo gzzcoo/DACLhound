@@ -76,6 +76,8 @@ def _analysis_edge_label(edge: dict[str, Any]) -> str:
         return scalar(edge.get("adcsEdgeLabel")) or ("ADCSESC13" if scalar(edge.get("esc")).upper() == "ESC13" else f"ADCS {scalar(edge.get('esc'))}")
     right = scalar(edge.get("right"))
     object_type = scalar(edge.get("objectType"))
+    raw_ace = edge.get("raw") if isinstance(edge.get("raw"), dict) else {}
+    object_guid = scalar(raw_ace.get("ObjectTypeGuid") or edge.get("objectTypeGuid")).strip("{}").casefold()
     normalized_object_type = object_type.casefold().replace("-", "")
     if edge.get("gmsaPasswordRead") or "msdsmanagedpassword" in normalized_object_type:
         return "ReadGMSAPassword"
@@ -103,13 +105,25 @@ def _analysis_edge_label(edge: dict[str, Any]) -> str:
     if "DELETE" in tokens:
         return "Delete"
     if "WRITE_VALIDATED" in tokens:
-        if scalar(edge.get("targetType")).casefold() == "group" and normalized in {"member", "memberselfmembership"}:
+        if scalar(edge.get("targetType")).casefold() == "group" and normalized in {
+            "member", "memberselfmembership", "self", "bf9679c00de611d0a28500aa003049e2",
+        }:
             return "AddSelf"
         return "ValidatedSPN" if "spn" in object_type.casefold() else "ValidatedWrite"
     if "CONTROL_ACCESS" in tokens:
+        extended_right_guids = {
+            "45ec5156-db7e-47bb-b53f-dbeb2d03c40f": "RestoreDeletedObjects",
+            "00299570-246d-11d0-a768-00aa006e0529": "ForceChangePassword",
+            "0e10c968-78fb-11d2-90d4-00c04f79dc55": "Enroll",
+        }
+        if object_guid in extended_right_guids:
+            return extended_right_guids[object_guid]
         for marker, label in (
             ("reanimate-tombstones", "RestoreDeletedObjects"),
+            ("reanimatetombstones", "RestoreDeletedObjects"),
             ("force-change-password", "ForceChangePassword"),
+            ("reset-password", "ForceChangePassword"),
+            ("resetpassword", "ForceChangePassword"),
             ("replication-get-changes-in-filtered-set", "GetChangesInFilteredSet"),
             ("replication-get-changes-all", "GetChangesAll"),
             ("replication-get-changes", "GetChanges"),
@@ -117,6 +131,8 @@ def _analysis_edge_label(edge: dict[str, Any]) -> str:
             ("manage-ca", "ManageCA"),
             ("manage-certificates", "ManageCertificates"),
             ("certificate-enrollment", "Enroll"),
+            ("certificate enrollment", "Enroll"),
+            ("enrollment", "Enroll"),
         ):
             if marker in object_type.casefold():
                 return label
@@ -193,13 +209,22 @@ def _analysis_actionable(edge: dict[str, Any]) -> bool:
         return True
     if "ACCESS_SYSTEM_SECURITY" in right:
         return True
-    if "CONTROL_ACCESS" in right and re.search(
-        r"reanimate-tombstones|force-change-password|replication-get-changes|all-extended-rights|add-self|apply-group-policy|manage-ca|manage-certificates|certificate-enrollment",
+    raw = edge.get("raw") if isinstance(edge.get("raw"), dict) else {}
+    object_guid = scalar(raw.get("ObjectTypeGuid") or edge.get("objectTypeGuid")).strip("{}").casefold()
+    if ("CONTROL_ACCESS" in right and re.search(
+        r"reanimate[- ]tombstones|reanimatetombstones|force-change-password|reset[- ]password|resetpassword|replication-get-changes|all-extended-rights|add-self|apply-group-policy|manage-ca|manage-certificates|certificate-enrollment",
         object_type,
-    ):
+    )) or ("CONTROL_ACCESS" in right and object_guid in {
+        "45ec5156-db7e-47bb-b53f-dbeb2d03c40f", "00299570-246d-11d0-a768-00aa006e0529",
+        "0e10c968-78fb-11d2-90d4-00c04f79dc55",
+    }):
         return True
     if "WRITE_VALIDATED" in right:
-        return ((scalar(edge.get("targetType")).casefold() == "group" and bool(re.search(r"(^|[^a-z])member([^a-z]|$)", object_type)))
+        validated_scope = re.sub(r"[^a-z0-9]", "", object_type)
+        self_membership = scalar(edge.get("targetType")).casefold() == "group" and validated_scope in {
+            "member", "memberselfmembership", "self", "bf9679c00de611d0a28500aa003049e2",
+        }
+        return (self_membership
                 or bool(re.search(r"validated-write-computer|validated-spn|validated-dns-host-name", object_type)))
     if "WRITE_PROP" in right:
         if normalized == "pwdlastset":
@@ -269,6 +294,11 @@ def _analysis_can_pivot(edge: dict[str, Any]) -> bool:
         return True
     if "ms-mcs-admpwd" in scalar(edge.get("objectType")).casefold() or "mslaps-password" in object_type:
         return True
+    if "WRITE_VALIDATED" in tokens and scalar(edge.get("targetType")).casefold() == "group":
+        if re.sub(r"[^a-z0-9]", "", scalar(edge.get("objectType")).casefold()) in {
+            "self", "member", "memberselfmembership", "bf9679c00de611d0a28500aa003049e2",
+        }:
+            return True
     if "WRITE_PROP" in tokens or "WRITE_VALIDATED" in tokens:
         pivot_attributes = (
             "serviceprincipalname", "msds-keycredentiallink",

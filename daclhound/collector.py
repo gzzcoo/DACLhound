@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .adcs import adcs_assessment, add_adcs_findings
-from .common import attr, canonical_sid, classify, int_attr, object_types, scalar, stable_id, trustees
+from .common import (attr, canonical_sid, classify, int_attr, object_types, scalar,
+                     stable_id, trustee_display_name, trustees)
 
 
 def ensure_bloodyad_available() -> None:
@@ -71,6 +72,30 @@ def request_tgt_ccache_hex(username: str, domain: str, password: str, kdc_host: 
     ccache = CCache()
     ccache.fromTGT(tgt, old_session_key, session_key)
     return ccache.getData().hex()
+
+
+def request_tgt_ccache_data(username: str, domain: str, kdc_host: str,
+                            password: str | None = None, nt_hash: str | None = None,
+                            aes_key: str | None = None) -> bytes:
+    """Acquire a TGT in-process and return a ccache byte string without writing it to disk."""
+    from impacket.krb5 import constants
+    from impacket.krb5.ccache import CCache
+    from impacket.krb5.kerberosv5 import getKerberosTGT
+    from impacket.krb5.types import Principal
+
+    principal = Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
+    tgt, _cipher, old_session_key, session_key = getKerberosTGT(
+        clientName=principal,
+        password=password or "",
+        domain=domain.upper(),
+        lmhash=b"",
+        nthash=bytes.fromhex(nt_hash) if nt_hash else b"",
+        aesKey=bytes.fromhex(aes_key) if aes_key else None,
+        kdcHost=kdc_host,
+    )
+    ccache = CCache()
+    ccache.fromTGT(tgt, old_session_key, session_key)
+    return ccache.getData()
 
 
 def kerberos_kdc_for_user_realm(domain: str, target_host: str, target_dc_ip: str | None) -> str:
@@ -157,9 +182,15 @@ async def collect_with_bloodyad(
             _, ldap_filter = type_map[kind]
             label = "domain trusts" if kind == "trusts" else f"{kind} DACLs"
             print(f"[*] Collecting {label} from {host}", file=sys.stderr)
-            async for entry in bloodyad_search(conn, base="DOMAIN", filter=ldap_filter,
-                                               attr=attrs, resolve_sd=True):
-                entries.append(json_value(entry))
+            try:
+                async for entry in bloodyad_search(conn, base="DOMAIN", filter=ldap_filter,
+                                                   attr=attrs, resolve_sd=True):
+                    entries.append(json_value(entry))
+            except NoResultError as exc:
+                if kind == "trusts" and exc.filter == ldap_filter:
+                    print("[i] No domain trusts found; continuing", file=sys.stderr)
+                    continue
+                raise
         if include_adcs:
             adcs_attrs = (
                 "distinguishedName,objectClass,objectSid,cn,name,displayName,nTSecurityDescriptor,"
@@ -392,14 +423,17 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
             source_id = object_ids.get(normalized_trustee[:-1])
         edge["source"] = source_id or f"trustee::{trustee.casefold()}"
         if edge["source"].startswith("trustee::"):
-            by_name[edge["source"]] = trustee
+            display_name = trustee_display_name(trustee)
+            edge["sourceName"] = display_name
+            by_name[edge["source"]] = display_name
         else:
             source_node = next((node for node in nodes if node["id"] == edge["source"]), None)
             if source_node:
                 edge["sourceName"] = source_node["name"]
                 edge["sourceType"] = source_node["type"]
-    for node_id, trustee in by_name.items():
-        nodes.append({"id": node_id, "name": trustee, "type": "trustee", "dn": "", "sid": "",
+    for node_id, trustee_name in by_name.items():
+        sid = canonical_sid(node_id.removeprefix("trustee::"))
+        nodes.append({"id": node_id, "name": trustee_name, "type": "trustee", "dn": "", "sid": sid,
                       "owner": "", "control": "", "memberOf": []})
     node_by_id = {node["id"]: node for node in nodes}
     domain_nodes = [node for node in nodes if node["type"] == "domain"]
@@ -524,8 +558,8 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                 if not principal_id:
                     principal_id = f"trustee::{principal_name.casefold()}"
                     if principal_id not in node_by_id:
-                        nodes.append({"id": principal_id, "name": principal_name, "type": "trustee",
-                                      "dn": "", "sid": "", "owner": "", "control": "", "memberOf": []})
+                        nodes.append({"id": principal_id, "name": trustee_display_name(principal_name), "type": "trustee",
+                                      "dn": "", "sid": canonical_sid(principal_name), "owner": "", "control": "", "memberOf": []})
                         node_by_id[principal_id] = nodes[-1]
                 principal_node = node_by_id.get(principal_id)
                 edges.append({"id": f"delegation::rbcd::{target_id}::{ace_index}::{principal_name.casefold()}",

@@ -28,6 +28,20 @@ COMMON_ADCS_PRINCIPALS = {
 }
 
 
+_CERTIFICATE_ENROLLMENT_GUID = "0e10c968-78fb-11d2-90d4-00c04f79dc55"
+
+
+def _is_certificate_enrollment_ace(ace: dict[str, Any]) -> bool:
+    """Recognize the enrollment extended right by GUID or its display name."""
+    raw = ace.get("raw") if isinstance(ace.get("raw"), dict) else ace
+    guid = scalar(raw.get("ObjectTypeGuid") or ace.get("ObjectTypeGuid")).strip("{}").casefold()
+    if guid == _CERTIFICATE_ENROLLMENT_GUID:
+        return True
+    object_type = scalar(ace.get("ObjectType")).casefold().replace("_", "-")
+    normalized = re.sub(r"[^a-z0-9]", "", object_type)
+    return any(token in normalized for token in ("certificateenrollment", "enroll", "allextendedrights"))
+
+
 def adcs_enrollers(entry: dict[str, Any], *, include_common: bool = False) -> set[str]:
     """Return trustees with an allow enrollment ACE or full control on an ADCS object."""
     descriptor = attr(entry, "nTSecurityDescriptor", {}) or {}
@@ -40,12 +54,11 @@ def adcs_enrollers(entry: dict[str, Any], *, include_common: bool = False) -> se
         if not isinstance(ace, dict) or "DENIED" in scalar(ace.get("Type")).upper():
             continue
         rights = {part.strip().upper() for part in scalar(ace.get("Right")).split("|")}
-        object_type = scalar(ace.get("ObjectType")).casefold().replace("_", "-")
         enroll_right = (
             "CONTROL_ACCESS" in rights
-            and any(token in object_type for token in ("certificate-enrollment", "enroll", "all-extended-rights"))
+            and _is_certificate_enrollment_ace(ace)
         ) or (
-            "WRITE_PROP" in rights and "certificate-enrollment" in object_type
+            "WRITE_PROP" in rights and _is_certificate_enrollment_ace(ace)
         )
         if enroll_right or "GENERIC_ALL" in rights:
             result.update(
@@ -65,8 +78,68 @@ def adcs_common_principal(value: str) -> bool:
     principals = [part.strip().casefold() for part in re.split(r"[;|]", value) if part.strip()]
     return bool(principals) and all(
         principal in COMMON_ADCS_PRINCIPALS
-        or re.fullmatch(r"s-1-5-21-(?:\d+-){3}(?:498|512|513|514|515|516|518|519|520|521|526|527|553)", principal)
+        or re.fullmatch(r"s-1-5-21-(?:\d+-){3}(?:498|512|513|514|515|516|517|518|519|520|521|526|527|553)", principal)
         or re.fullmatch(r"s-1-5-(?:18|19|20|32-(?:544|548|549|550|551|552|554|555|556|557|558|559|560|562|568|569|573|574|575|576|577|578|579|580|581|582|583|584|585|586|587|588|589|590|591|592|593|594|595|596|597|598|599))", principal)
+        for principal in principals
+    )
+
+
+def adcs_cert_publishers_user_members(principal: str, edges: list[dict[str, Any]],
+                                      nodes_by_id: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Return non-default users who reach Cert Publishers through group membership."""
+    nodes_by_id = nodes_by_id or {}
+    principal_key = principal.casefold()
+    group_ids = {
+        node_id for node_id, node in nodes_by_id.items()
+        if scalar(node.get("type")).casefold() == "group"
+        and (scalar(node.get("sid")).casefold() == principal_key
+             or scalar(node.get("name")).casefold() == principal_key
+             or scalar(node.get("samAccountName")).casefold() == principal_key)
+    }
+    if not group_ids and (principal_key == "cert publishers" or principal_key.endswith("-517")):
+        group_ids = {
+            scalar(edge.get("target")) for edge in edges
+            if edge.get("kind") == "membership"
+            and (scalar(edge.get("targetName")).casefold() == "cert publishers"
+                 or scalar(edge.get("target")).casefold() == principal_key)
+        }
+    if not group_ids:
+        return []
+
+    members_by_group: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        if edge.get("kind") == "membership":
+            members_by_group.setdefault(scalar(edge.get("target")), []).append(edge)
+
+    users: dict[str, dict[str, Any]] = {}
+    pending, visited = list(group_ids), set()
+    while pending:
+        group_id = pending.pop()
+        if group_id in visited:
+            continue
+        visited.add(group_id)
+        for edge in members_by_group.get(group_id, []):
+            member_id = scalar(edge.get("source"))
+            member = nodes_by_id.get(member_id, {})
+            member_type = scalar(member.get("type") or edge.get("sourceType")).casefold()
+            if member_type == "group":
+                pending.append(member_id)
+                continue
+            if member_type != "user":
+                continue
+            name = scalar(member.get("samAccountName") or member.get("name") or edge.get("sourceName"))
+            sid = scalar(member.get("sid") or (member_id if member_id.startswith("S-1-") else ""))
+            if name.casefold() in {"administrator", "guest", "krbtgt"} or sid.casefold().endswith(("-500", "-501", "-502")):
+                continue
+            users[member_id] = {**member, "id": member_id, "name": name, "sid": sid, "type": "user"}
+    return list(users.values())
+
+
+def adcs_is_cert_publishers_principal(value: str) -> bool:
+    principals = [part.strip().casefold() for part in re.split(r"[;|]", value) if part.strip()]
+    return any(
+        principal == "cert publishers"
+        or re.fullmatch(r"s-1-5-21-(?:\d+-){3}517", principal)
         for principal in principals
     )
 
@@ -127,7 +200,7 @@ def adcs_assessment(entries: list[dict[str, Any]], edges: list[dict[str, Any]]) 
                 continue
             rights = {part.strip().upper() for part in scalar(ace.get("Right")).split("|")}
             trustee = scalar(ace.get("Trustee"))
-            if adcs_common_principal(trustee):
+            if adcs_common_principal(trustee) and not adcs_cert_publishers_user_members(trustee, edges):
                 continue
             result.append((trustee, scalar(ace.get("ObjectType")), rights,
                            scalar(ace.get("Type"))))
@@ -331,13 +404,7 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
             if not isinstance(ace, dict):
                 continue
             rights = {part.strip().upper() for part in scalar(ace.get("Right")).split("|")}
-            object_scope = {
-                value.casefold().replace("_", "-")
-                for value in object_types(ace.get("ObjectType"))
-            }
-            if "CONTROL_ACCESS" not in rights or not any(
-                "certificate-enrollment" in scope for scope in object_scope
-            ):
+            if "CONTROL_ACCESS" not in rights or not _is_certificate_enrollment_ace(ace):
                 continue
             for trustee in trustees(ace.get("Trustee")):
                 source_id = principal_node(trustee)
@@ -428,12 +495,8 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
             if not isinstance(ace, dict) or "DENIED" in scalar(ace.get("Type")).upper():
                 continue
             rights = {part.strip().upper() for part in scalar(ace.get("Right")).split("|")}
-            scope = {value.casefold().replace("_", "-") for value in object_types(ace.get("ObjectType"))}
             has_enrollment = "GENERIC_ALL" in rights or (
-                "CONTROL_ACCESS" in rights and any(
-                    token in item for item in scope
-                    for token in ("certificate-enrollment", "enroll", "all-extended-rights")
-                )
+                "CONTROL_ACCESS" in rights and _is_certificate_enrollment_ace(ace)
             )
             if not has_enrollment:
                 continue
@@ -643,7 +706,24 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
     # have been collected and validated.
     def emit_indicator(esc: str, item: dict[str, Any], principal: str, evidence: list[str],
                        ca: dict[str, Any] | None = None, is_acl: bool | None = None) -> None:
+        # Default administrative groups are expected to control PKI objects.
+        # Expanding their nested users turns every domain admin (for example,
+        # Athena) into a misleading individual ESC5/ESC7 finding.
+        if adcs_default_admin_principal(principal):
+            return
         if adcs_common_principal(principal):
+            if not adcs_is_cert_publishers_principal(principal):
+                return
+            members = adcs_cert_publishers_user_members(principal, edges, nodes_by_id)
+            if members:
+                for member in members:
+                    member_id = scalar(member.get("id"))
+                    member_name = scalar(member.get("name")) or scalar(member.get("samAccountName"))
+                    member_evidence = evidence + [
+                        f"{member_name} is a direct or nested user member of Cert Publishers and inherits this access."
+                    ]
+                    add_finding(member_id, esc, item, ca, member_id, member_name,
+                                False, member_evidence, is_acl)
             return
         source = principal_node(principal)
         add_finding(source, esc, item, ca, source, nodes_by_id[source]["name"], False, evidence, is_acl)

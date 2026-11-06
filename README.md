@@ -44,7 +44,9 @@ The collector is read-only. By default it collects users, groups, computers, OUs
 DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p 'password' --types users,groups --output users-and-groups.json
 ```
 
-Use `--no-adcs` to skip ADCS collection. The normalized graph is written to `--output`. Add `--raw-output` to keep the bloodyAD response as well.
+Use `--no-adcs` to skip ADCS collection. The normalized graph is written to `--output`. Add `--raw-output` to keep the collector's raw entries as well.
+
+By default, `collect` tries LDAP first and retries through DACLhound's native ADWS transport when LDAP cannot connect. To force ADWS, use `--transport adws`; use `--transport ldap` to require LDAP. ADWS uses TCP port 9389 and supports NTLM and Kerberos authentication. Kerberos uses the selected ccache or obtains a ticket in memory with Impacket; DACLhound does not launch another collector or authentication tool. LDAPS applies to LDAP collection. The ADWS collector reads security descriptors directly and resolves schema GUIDs so attribute-scoped `Write-Property` rights remain visible.
 
 LDAP visibility depends on the account used for collection. If you have multiple accounts with different directory permissions, collect the domain with each one; their results may reveal additional objects or ACLs. Load the resulting JSON files together in the graph viewer, or pass them together to `analyze` to combine their data.
 

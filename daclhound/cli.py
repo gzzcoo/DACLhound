@@ -34,7 +34,7 @@ def main() -> int:
     parser.add_argument("--version", action="version", version=f"DACLhound {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     ap = commands.add_parser(
-        "collect", description="Read-only Active Directory DACL collector powered by bloodyAD.",
+        "collect", description="Read-only Active Directory DACL collector using LDAP or native ADWS.",
         help="Collect DACLs and write a normalized graph JSON",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='Example:\n  DACLhound.py collect --host $FQDN -d $DOMAIN -u \'user\' -p \'password\' --dc-ip $IP --output "$DOMAIN".json',
@@ -43,7 +43,7 @@ def main() -> int:
     auth.add_argument("-H", "--host", required=True, help="Domain controller hostname or IP")
     auth.add_argument("-d", dest="domain", required=True, metavar="DOMAIN", help="Domain used for authentication")
     auth.add_argument("-u", dest="username", metavar="USERNAME",
-                      help="Username used for NTLM authentication")
+                      help="Username used for NTLM or Kerberos authentication")
     auth.add_argument("-p", dest="password", metavar="PASSWORD",
                       help="Password for NTLM, or for Kerberos when combined with -k")
     auth.add_argument("-hashes", dest="nt_hash", metavar="LMHASH:NTHASH",
@@ -56,6 +56,8 @@ def main() -> int:
                       help="Do not use a password; authenticate with the ccache selected by -k or KRB5CCNAME")
 
     collection = ap.add_argument_group("collection")
+    collection.add_argument("--transport", choices=("auto", "ldap", "adws"), default="auto",
+                            help="Collection transport: try LDAP then ADWS on connection failure (default), or force one")
     collection.add_argument("--types", default="users,groups,computers,ous,containers,gpos,domain,trusts",
                             help="Comma-separated object types: users, groups, computers, OUs, containers, GPOs, domain, trusts")
     collection.add_argument("--no-adcs", action="store_true", help="Skip native ADCS ESC collection (enabled by default)")
@@ -68,8 +70,8 @@ def main() -> int:
 
     connection = ap.add_argument_group("connection and diagnostics")
     connection.add_argument("-i", "--dc-ip", help="Domain controller IP when -H is a hostname")
-    connection.add_argument("-s", "--secure", action="store_true", help="Use LDAPS")
-    connection.add_argument("-t", "--timeout", type=int, default=180, help="LDAP connection timeout in seconds")
+    connection.add_argument("-s", "--secure", action="store_true", help="Use LDAPS (LDAP transport only)")
+    connection.add_argument("-t", "--timeout", type=int, default=180, help="Connection timeout in seconds")
     connection.add_argument("-v", "--verbose", action="count", default=0,
                             help="Show additional collection details; repeat for more detail")
     graph = commands.add_parser(
@@ -204,6 +206,7 @@ def main() -> int:
              "userAccountControl,msDS-AllowedToDelegateTo,msDS-AllowedToActOnBehalfOfOtherIdentity,msDS-GroupMSAMembership,"
              "servicePrincipalName,dNSHostName,adminCount,trustPartner,trustDirection,trustType,trustAttributes,securityIdentifier")
     raw_entries: list[dict[str, Any]] = []
+    used_adws = False
     if ns.from_raw:
         try:
             loaded = json.loads(Path(ns.from_raw).read_text(encoding="utf-8"))
@@ -213,23 +216,78 @@ def main() -> int:
             raise RuntimeError("The --from-raw file must contain a JSON list")
         raw_entries = [x for x in loaded if isinstance(x, dict)]
     else:
-        ensure_bloodyad_available()
-        if ns.verbose:
-            auth_mode = ("Kerberos AES key" if ns.aes_key else "Kerberos ccache" if kerberos_ticket else "Kerberos password" if ns.kerberos is not None and ns.password
-                         else "Kerberos" if ns.kerberos is not None else "NTLM hash" if ns.nt_hash
-                         else "NTLM password" if ns.password else "integrated/default")
-            print(f"[*] Authentication: {auth_mode}; LDAP security: {'LDAPS' if ns.secure else 'LDAP'}", file=sys.stderr)
-            if ns.verbose > 1 and kerberos_ticket:
-                print(f"[*] Kerberos ccache: {kerberos_ticket}", file=sys.stderr)
-        try:
-            raw_entries = asyncio.run(collect_with_bloodyad(
-                ns.host, ns.domain, ns.username, auth_secret, kerberos_ticket,
-                requested_objects, type_map, attrs, ns.timeout, ns.dc_ip, include_adcs,
-                ns.secure, kerberos_enabled,
-                "aes" if ns.aes_key else "rc4" if ns.nt_hash and kerberos_enabled else "",
-            ))
-        except Exception as exc:
-            raise RuntimeError(f"bloodyAD library collection failed: {exc}") from exc
+        def collect_adws() -> list[dict[str, Any]]:
+            from .adws.collector import ADWSCollector
+            kerberos_ccache = None
+            kdc_host = None
+            if kerberos_enabled or ns.aes_key:
+                if not ns.username and not kerberos_ticket:
+                    raise RuntimeError("native ADWS Kerberos requires -u and either a ccache or Kerberos credentials")
+                if not kerberos_ticket:
+                    if not ns.username:
+                        raise RuntimeError("native ADWS Kerberos needs -u when obtaining a ticket from a password or key")
+                    from .collector import kerberos_kdc_for_user_realm, request_tgt_ccache_data
+                    kdc_host = kerberos_kdc_for_user_realm(ns.domain, ns.host, ns.dc_ip)
+                    kerberos_ccache = request_tgt_ccache_data(
+                        ns.username, ns.domain, kdc_host,
+                        password=ns.password,
+                        nt_hash=(auth_secret if ns.nt_hash else None),
+                        aes_key=ns.aes_key,
+                    )
+                else:
+                    from .collector import kerberos_kdc_for_user_realm
+                    kdc_host = kerberos_kdc_for_user_realm(ns.domain, ns.host, ns.dc_ip)
+                collector = ADWSCollector(
+                    ns.host, ns.domain, ns.username or "", None, timeout=ns.timeout, dc_ip=ns.dc_ip,
+                    kerberos=True, kerberos_ticket=kerberos_ticket,
+                    kerberos_ccache=kerberos_ccache, kdc_host=kdc_host,
+                )
+                return collector.collect(requested_objects, type_map, attrs, include_adcs)
+            secret = auth_secret if ns.password else None
+            hashes = auth_secret if ns.nt_hash else None
+            if not ns.username or not (secret or hashes):
+                raise RuntimeError("native ADWS requires -u and either -p or -hashes")
+            collector = ADWSCollector(ns.host, ns.domain, ns.username, secret,
+                                      hashes=hashes, timeout=ns.timeout, dc_ip=ns.dc_ip)
+            return collector.collect(requested_objects, type_map, attrs, include_adcs)
+
+        if ns.transport == "adws":
+            auth_mode = "Kerberos" if kerberos_enabled or ns.aes_key else "NTLM"
+            print(f"[*] Authentication: {auth_mode}; transport: ADWS", file=sys.stderr)
+            try:
+                raw_entries = collect_adws()
+                used_adws = True
+            except Exception as exc:
+                raise RuntimeError(f"native ADWS collection failed: {exc}") from exc
+        else:
+            try:
+                ensure_bloodyad_available()
+                if ns.verbose:
+                    auth_mode = ("Kerberos AES key" if ns.aes_key else "Kerberos ccache" if kerberos_ticket else "Kerberos password" if ns.kerberos is not None and ns.password
+                                 else "Kerberos" if ns.kerberos is not None else "NTLM hash" if ns.nt_hash
+                                 else "NTLM password" if ns.password else "integrated/default")
+                    print(f"[*] Authentication: {auth_mode}; LDAP security: {'LDAPS' if ns.secure else 'LDAP'}", file=sys.stderr)
+                raw_entries = asyncio.run(collect_with_bloodyad(
+                    ns.host, ns.domain, ns.username, auth_secret, kerberos_ticket,
+                    requested_objects, type_map, attrs, ns.timeout, ns.dc_ip, include_adcs,
+                    ns.secure, kerberos_enabled,
+                    "aes" if ns.aes_key else "rc4" if ns.nt_hash and kerberos_enabled else "",
+                ))
+            except Exception as exc:
+                network_failure = any(token in str(exc).casefold() for token in (
+                    "timed out", "timeout", "connection refused", "no route", "network is unreachable",
+                    "ldap server unavailable", "cannot connect", "connection failed", "connect call failed",
+                    "connection reset", "errno 111", "getaddrinfo",
+                    "name or service not known", "bloodyad python package is missing",
+                ))
+                if ns.transport != "auto" or ns.secure or not network_failure:
+                    raise RuntimeError(f"LDAP collection failed: {exc}") from exc
+                print(f"[!] LDAP connection failed ({exc}); retrying collection through native ADWS", file=sys.stderr)
+                try:
+                    raw_entries = collect_adws()
+                    used_adws = True
+                except Exception as adws_exc:
+                    raise RuntimeError(f"LDAP was unavailable and native ADWS collection also failed: {adws_exc}") from adws_exc
 
     if not include_adcs:
         raw_entries = [entry for entry in raw_entries if not entry.get("__daclgraph_adcs_kind")]
@@ -250,8 +308,10 @@ def main() -> int:
         raw_path.write_text(json.dumps(raw_entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"[+] Objects: {dataset['stats']['objects']} | ACEs: {dataset['stats']['aces']} | Trustees: {dataset['stats']['trustees']} | ADCS findings: {dataset['stats']['adcsFindings']}")
     print(f"[+] Graph: {out}")
+    if used_adws:
+        print("[*] Need to exploit over ADWS, for example when LDAP is unavailable? SOAPy supports targeted operations such as RBCD, Shadow Credentials, and SPN/UAC writes: https://github.com/logangoins/SOAPy")
     if raw_path:
-        print(f"[+] Raw bloodyAD response: {raw_path}")
+        print(f"[+] Raw collector response: {raw_path}")
     return 0
 
 
