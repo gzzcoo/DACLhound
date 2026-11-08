@@ -1,8 +1,8 @@
 # DACLhound
 
-DACLhound collects Active Directory security descriptors over LDAP and turns the results into a graph you can inspect in a browser. The collector uses bloodyAD as a Python library; it does not run the `bloodyAD` command. Impacket's Python library handles password-based Kerberos TGT requests, passing the ticket in memory to bloodyAD.
+DACLhound collects and analyzes Active Directory permissions over LDAP or native ADWS. Explore the results in the interactive graph viewer or run `analyze` for a quick terminal overview.
 
-It is primarily intended for Hack The Box (HTB) and similar hands-on labs, and works best with lab-sized or otherwise moderate Active Directory environments. It is not designed or performance-tested for very large enterprise domains.
+DACLhound is built for Hack The Box (HTB) and similar hands-on labs. It works best with small and medium-sized domains; performance in very large enterprise environments has not been evaluated.
 
 Unlike BloodHound CE's modeled graph edges, DACLhound preserves the collected DACL details and exposes individual `Write-Property` rights by attribute (for example, `WriteLogonHours` or `WriteUserAccountControl`, etc.). This helps inspect the specific property and ACE behind a relationship.
 
@@ -35,18 +35,22 @@ pipx upgrade DACLhound
 ## Collect a graph
 
 ```sh
-DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p 'password' --dc-ip $IP --output $DOMAIN.json
+DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1
 ```
+
+`--host` accepts the domain controller's FQDN or IP address. Use the FQDN when authenticating with Kerberos.
+
+By default, the graph is saved using the domain name in the current directory: the first collection creates `lab.local.json`, and later collections use the next available name, such as `lab.local_1.json`. Use `--output custom-name.json` only when you want to choose a custom path; existing files get the same numeric suffix. Pass `--overwrite` only when you want to replace the selected output file.
 
 The collector is read-only. By default it collects users, groups, computers, OUs, containers, GPOs, the domain, and ADCS data. Use `--types` to limit directory object types:
 
 ```sh
-DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p 'password' --types users,groups --output users-and-groups.json
+DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --types users,groups
 ```
 
-Use `--no-adcs` to skip ADCS collection. The normalized graph is written to `--output`. Add `--raw-output` to keep the collector's raw entries as well.
+Use `--no-adcs` to skip ADCS collection. The graph uses the domain-based default filename described above. Add `--raw-output` to keep the collector's raw entries as well.
 
-By default, `collect` tries LDAP first and retries through DACLhound's native ADWS transport when LDAP cannot connect. To force ADWS, use `--transport adws`; use `--transport ldap` to require LDAP. ADWS uses TCP port 9389 and supports NTLM and Kerberos authentication. Kerberos uses the selected ccache or obtains a ticket in memory with Impacket.
+By default, `collect` tries LDAP, then falls back to native ADWS if LDAP cannot connect. Choose a transport explicitly with `--transport ldap` or `--transport adws`. ADWS uses TCP port 9389 and supports NTLM and Kerberos; `--secure` applies to LDAP only. DACLhound resolves schema GUIDs so attribute-level `Write-Property` rights remain visible.
 
 LDAP visibility depends on the account used for collection. If you have multiple accounts with different directory permissions, collect the domain with each one; their results may reveal additional objects or ACLs. Load the resulting JSON files together in the graph viewer, or pass them together to `analyze` to combine their data.
 
@@ -55,9 +59,9 @@ LDAP visibility depends on the account used for collection. If you have multiple
 Run a quick console triage of saved graphs without opening the web viewer. `analyze` reports domain context, Domain Admins, effective permission paths, Kerberos roasting, delegations, ADCS findings, trusts, and other useful relationships. You can analyze several domains together; duplicate objects and relationships are combined:
 
 ```sh
-DACLhound.py analyze result.json
-DACLhound.py analyze result.json result2.json
-DACLhound.py analyze result.json --from-user 'alice'
+DACLhound.py analyze lab.local.json
+DACLhound.py analyze lab.local.json megacorp.local.json
+DACLhound.py analyze lab.local.json --from-user 'alice@lab.local'
 ```
 
 By default, `analyze` traces effective permission paths from collected users, resolves trustees by SID across all supplied JSON files, and groups paths that share a trustee group. It also reports direct rights, domain membership, delegation, roasting, ADCS, and GPO link findings in prioritized sections. Use `--from-user` to focus the paths on one account. Output is colorized by default; use `--color never` to disable colors. This is a quick way to review findings from the terminal when you do not need the web viewer.
@@ -67,15 +71,15 @@ By default, `analyze` traces effective permission paths from collected users, re
 ### NTLM password
 
 ```sh
-DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p 'password' --dc-ip $IP -o $DOMAIN.json
+DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1
 ```
 
 ### NTLM pass-the-hash
 
-Use `LMHASH:NTHASH`; if you only have the NT hash, leave the LM field empty:
+Pass the NT hash directly, or use `LMHASH:NTHASH` when you have both hashes:
 
 ```sh
-DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -hashes ':<NTHASH>' --dc-ip $IP -o $DOMAIN.json
+DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -hashes '613a519b5b0ef57c07bc6395aa1aff14' --dc-ip 192.168.2.1
 ```
 
 ### Kerberos
@@ -87,25 +91,25 @@ an explicit flag for ccache authentication.
 **Password:**
 
 ```sh
-DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -p '<password>' -k --dc-ip $IP -o $DOMAIN.json
+DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' -k --dc-ip 192.168.2.1
 ```
 
 **Pass-the-hash (NT hash used as the Kerberos RC4 key):**
 
 ```sh
-DACLhound.py collect --host $FQDN -d $DOMAIN -u 'user' -hashes '<LMHASH>:<NTHASH>' -k --dc-ip $IP -o $DOMAIN.json
+DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -hashes '613a519b5b0ef57c07bc6395aa1aff14' -k --dc-ip 192.168.2.1
 ```
 
-If only the NT hash is available, use `-hashes '<NTHASH>'`.
+If both hashes are available, use `-hashes '<LMHASH>:<NTHASH>'`.
 
 **Existing ccache:**
 
 ```sh
 # Use the current KRB5CCNAME
-DACLhound.py collect --host $FQDN -d $DOMAIN -k -no-pass --dc-ip $IP -o DOMAIN.json
+DACLhound.py collect --host DC01.lab.local -d lab.local -k -no-pass --dc-ip 192.168.2.1
 
 # Or provide a ccache file directly
-DACLhound.py collect --host $FQDN -d $DOMAIN -k user.ccache -no-pass --dc-ip $IP -o $DOMAIN.json
+DACLhound.py collect --host DC01.lab.local -d lab.local -k user.ccache -no-pass --dc-ip 192.168.2.1
 ```
 
 An AES key enables Kerberos automatically: use `-aesKey '<AESKEY>'` (with `-u`). Add `-s` to use LDAPS.
@@ -115,17 +119,15 @@ An AES key enables Kerberos automatically: use `-aesKey '<AESKEY>'` (with `-u`).
 Run the viewer in the foreground and stop it with `Ctrl+C`:
 
 ```sh
-DACLhound.py graph --input $DOMAIN.json
+DACLhound.py graph --input lab.local.json
 ```
 
-Or run it in the background:
+Or manage the viewer as a background service:
 
-```sh
-DACLhound.py graph start
-DACLhound.py graph start --input $DOMAIN.json
-DACLhound.py graph status
-DACLhound.py graph stop
-```
+- Start the viewer without preloading a graph: `DACLhound.py graph start`.
+- Start the viewer and load a graph immediately: `DACLhound.py graph start --input lab.local.json`.
+- Check whether the background viewer is running: `DACLhound.py graph status`.
+- Stop the background viewer: `DACLhound.py graph stop`.
 
 The server listens on `127.0.0.1:8765` by default. Uploaded JSON files stay in memory while the server is running and are discarded when it stops. Use `--bind` and `--port` to change the listener. Run `DACLhound.py collect --help` or `DACLhound.py graph --help` for all options.
 

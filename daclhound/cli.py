@@ -29,6 +29,45 @@ from .graph_control import (
 from .server import run_server
 
 
+def _output_candidate(path: Path, index: int) -> Path:
+    if index == 0:
+        return path
+    return path.with_name(f"{path.stem}_{index}{path.suffix}")
+
+
+def _path_exists(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _default_output_path(domain: str) -> Path:
+    label = re.sub(r"[^a-zA-Z0-9.-]+", "_", domain.strip().rstrip(".").lower()).strip("._-")
+    return Path(f"{label or 'daclgraph'}.json")
+
+
+def _resolve_output_paths(
+    domain: str,
+    output: str | None,
+    raw_output: str | None,
+    overwrite: bool,
+) -> tuple[Path, Path | None]:
+    base_output = Path(output) if output else _default_output_path(domain)
+    base_raw = Path(raw_output) if raw_output else None
+    for index in range(1_000_000):
+        graph_path = _output_candidate(base_output, index)
+        if raw_output is None:
+            raw_path = None
+        elif raw_output == "":
+            raw_path = graph_path.with_name(f"{graph_path.stem}.raw.json")
+        else:
+            assert base_raw is not None
+            raw_path = _output_candidate(base_raw, index)
+        if raw_path is not None and graph_path.resolve() == raw_path.resolve():
+            raise RuntimeError("Graph output and raw output must use different paths")
+        if overwrite or not any(_path_exists(path) for path in (graph_path, raw_path) if path is not None):
+            return graph_path, raw_path
+    raise RuntimeError("Could not find an unused output filename")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Collect, analyze, or graph Active Directory DACL data.")
     parser.add_argument("--version", action="version", version=f"DACLhound {__version__}")
@@ -37,7 +76,7 @@ def main() -> int:
         "collect", description="Read-only Active Directory DACL collector using LDAP or native ADWS.",
         help="Collect DACLs and write a normalized graph JSON",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='Example:\n  DACLhound.py collect --host $FQDN -d $DOMAIN -u \'user\' -p \'password\' --dc-ip $IP --output "$DOMAIN".json',
+        epilog="Example:\n  DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1",
     )
     auth = ap.add_argument_group("authentication")
     auth.add_argument("-H", "--host", required=True, help="Domain controller hostname or IP")
@@ -63,17 +102,17 @@ def main() -> int:
     collection.add_argument("--no-adcs", action="store_true", help="Skip native ADCS ESC collection (enabled by default)")
 
     output = ap.add_argument_group("output")
-    output.add_argument("-o", "--output", default="daclgraph.json", help="Path for normalized graph JSON")
+    output.add_argument("-o", "--output", help="Custom path for normalized graph JSON (default: DOMAIN.json)")
+    output.add_argument("--overwrite", action="store_true",
+                        help="Overwrite the selected graph and raw output files instead of adding a numeric suffix")
     output.add_argument("--raw-output", nargs="?", const="", metavar="FILE",
-                        help="Also save raw bloodyAD data (optional; defaults to OUTPUT.raw.json)")
+                        help="Also save raw collector data (optional; defaults to the selected graph name plus .raw.json)")
     output.add_argument("--from-raw", help="Build the graph from an existing raw JSON file without querying LDAP")
 
-    connection = ap.add_argument_group("connection and diagnostics")
+    connection = ap.add_argument_group("connection")
     connection.add_argument("-i", "--dc-ip", help="Domain controller IP when -H is a hostname")
     connection.add_argument("-s", "--secure", action="store_true", help="Use LDAPS (LDAP transport only)")
     connection.add_argument("-t", "--timeout", type=int, default=180, help="Connection timeout in seconds")
-    connection.add_argument("-v", "--verbose", action="count", default=0,
-                            help="Show additional collection details; repeat for more detail")
     graph = commands.add_parser(
         "graph", help="Serve a graph JSON in the interactive web viewer",
         description="Run the graph viewer in this terminal or manage it as a background service.",
@@ -262,11 +301,6 @@ def main() -> int:
         else:
             try:
                 ensure_bloodyad_available()
-                if ns.verbose:
-                    auth_mode = ("Kerberos AES key" if ns.aes_key else "Kerberos ccache" if kerberos_ticket else "Kerberos password" if ns.kerberos is not None and ns.password
-                                 else "Kerberos" if ns.kerberos is not None else "NTLM hash" if ns.nt_hash
-                                 else "NTLM password" if ns.password else "integrated/default")
-                    print(f"[*] Authentication: {auth_mode}; LDAP security: {'LDAPS' if ns.secure else 'LDAP'}", file=sys.stderr)
                 raw_entries = asyncio.run(collect_with_bloodyad(
                     ns.host, ns.domain, ns.username, auth_secret, kerberos_ticket,
                     requested_objects, type_map, attrs, ns.timeout, ns.dc_ip, include_adcs,
@@ -298,12 +332,10 @@ def main() -> int:
         unique[stable_id(e) or json.dumps(e, sort_keys=True)] = e
     raw_entries = list(unique.values())
     dataset = build_dataset(raw_entries, ns.domain, selected)
-    out = Path(ns.output)
+    out, raw_path = _resolve_output_paths(ns.domain, ns.output, ns.raw_output, ns.overwrite)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(dataset, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    raw_path = None
-    if ns.raw_output is not None:
-        raw_path = Path(ns.raw_output) if ns.raw_output else out.with_name(out.stem + ".raw.json")
+    if raw_path is not None:
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         raw_path.write_text(json.dumps(raw_entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"[+] Objects: {dataset['stats']['objects']} | ACEs: {dataset['stats']['aces']} | Trustees: {dataset['stats']['trustees']} | ADCS findings: {dataset['stats']['adcsFindings']}")

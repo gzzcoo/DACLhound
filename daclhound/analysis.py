@@ -88,6 +88,7 @@ def _analysis_edge_label(edge: dict[str, Any]) -> str:
         return "ReadLAPSPassword"
     normalized = re.sub(r"[^a-z0-9]", "", object_type.casefold())
     tokens = {token.strip().upper() for token in right.split("|") if token.strip()}
+    can_contain_children = scalar(edge.get("targetType")).casefold() in {"ou", "container", "domain"}
     if "GENERIC_ALL" in tokens:
         return "GenericAll"
     if "GENERIC_WRITE" in tokens:
@@ -96,9 +97,9 @@ def _analysis_edge_label(edge: dict[str, Any]) -> str:
         return "WriteDacl"
     if "WRITE_OWNER" in tokens:
         return "WriteOwner"
-    if "CREATE_CHILD" in tokens and "DELETE_CHILD" in tokens:
+    if can_contain_children and "CREATE_CHILD" in tokens and "DELETE_CHILD" in tokens:
         return "CreateChild / DeleteChild"
-    if "DELETE_CHILD" in tokens:
+    if can_contain_children and "DELETE_CHILD" in tokens:
         return "DeleteChild"
     if "DELETE_TREE" in tokens:
         return "DeleteTree"
@@ -146,6 +147,8 @@ def _analysis_edge_label(edge: dict[str, Any]) -> str:
         "FORCECHANGEPASSWORD": "ForceChangePassword", "OWNERSHIP": "Owns",
     }
     display = [mapping[token.strip().upper()] for token in right.split("|") if token.strip() and token.strip().upper() in mapping]
+    if not can_contain_children:
+        display = [label for label in display if label not in {"CreateChild", "DeleteChild"}]
     # Broad rights make redundant component rights unhelpful in the display.
     if "GenericAll" in display:
         display = ["GenericAll"]
@@ -203,9 +206,9 @@ def _analysis_actionable(edge: dict[str, Any]) -> bool:
         "msmcsadmpwd", "mslapspassword", "mslapsencryptedpassword", "mslapsencryptedpasswordhistory",
     )):
         return True
-    if re.search(r"GENERIC_ALL|GENERIC_WRITE|WRITE_DACL|WRITE_OWNER|DELETE_CHILD|DELETE_TREE|\bDELETE\b", right):
+    if re.search(r"GENERIC_ALL|GENERIC_WRITE|WRITE_DACL|WRITE_OWNER|DELETE_TREE|\bDELETE\b", right):
         return True
-    if "CREATE_CHILD" in right and scalar(edge.get("targetType")).casefold() in {"ou", "container", "domain"}:
+    if re.search(r"CREATE_CHILD|DELETE_CHILD", right) and scalar(edge.get("targetType")).casefold() in {"ou", "container", "domain"}:
         return True
     if "ACCESS_SYSTEM_SECURITY" in right:
         return True
