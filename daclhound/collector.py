@@ -452,11 +452,12 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                           "trustType": trust_node.get("trustType", ""),
                           "trustAttributes": trust_node.get("trustAttributes", ""),
                           "isACL": False, "inherited": False})
-    # RustHound-CE derives SQLAdmin from MSSQLSvc SPNs in LDAP. Mirror that
-    # behavior without claiming that SQL Server roles were queried or verified.
+    # Mirror RustHound-CE's SPN-derived SQLAdmin display for user service
+    # accounts. A computer account's own MSSQLSvc SPN does not make that host
+    # an SQL administrator. SQL Server roles are not queried or verified.
     sql_targets: dict[tuple[str, str], dict[str, Any]] = {}
     for principal in nodes:
-        if principal["type"] not in {"user", "computer"}:
+        if principal["type"] != "user":
             continue
         entry = entries_by_node_id.get(principal["id"], {})
         spns = attr(entry, "servicePrincipalName", []) or []
