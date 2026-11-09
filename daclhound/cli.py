@@ -97,8 +97,8 @@ def main() -> int:
     collection = ap.add_argument_group("collection")
     collection.add_argument("--transport", choices=("auto", "ldap", "adws"), default="auto",
                             help="Collection transport: try LDAP then ADWS on connection failure (default), or force one")
-    collection.add_argument("--types", default="users,groups,computers,ous,containers,gpos,domain,trusts",
-                            help="Comma-separated object types: users, groups, computers, OUs, containers, GPOs, domain, trusts")
+    collection.add_argument("--types", default="users,groups,computers,ous,containers,gpos,domain,trusts,sites,foreign-security-principals",
+                            help="Comma-separated object types: users, groups, computers, OUs, containers, GPOs, domain, trusts, sites, foreign-security-principals")
     collection.add_argument("--no-adcs", action="store_true", help="Skip native ADCS ESC collection (enabled by default)")
 
     output = ap.add_argument_group("output")
@@ -184,7 +184,9 @@ def main() -> int:
                 "containers": ("container", "(objectClass=container)"),
                 "gpos": ("gpo", "(objectClass=groupPolicyContainer)"),
                 "domain": ("domain", "(objectClass=domainDNS)"),
-                "trusts": ("trusted_domain", "(objectClass=trustedDomain)")}
+                "trusts": ("trusted_domain", "(objectClass=trustedDomain)"),
+                "sites": ("site", "(objectClass=site)"),
+                "foreign-security-principals": ("foreign_security_principal", "(objectClass=foreignSecurityPrincipal)")}
     requested = {x.strip().lower() for x in ns.types.split(",") if x.strip()}
     unknown = requested - (set(type_map) | {"adcs"})
     if unknown or not requested:

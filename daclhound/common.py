@@ -73,6 +73,10 @@ def classify(entry: dict[str, Any]) -> str:
         return "gpo"
     if "trusteddomain" in normalized:
         return "trusted_domain"
+    if "site" in normalized:
+        return "site"
+    if "foreignsecurityprincipal" in normalized:
+        return "foreign_security_principal"
     if "organizationalunit" in normalized:
         return "ou"
     if "container" in normalized:

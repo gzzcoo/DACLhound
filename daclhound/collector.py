@@ -180,15 +180,20 @@ async def collect_with_bloodyad(
     try:
         for kind in sorted(requested):
             _, ldap_filter = type_map[kind]
+            base = "DOMAIN"
+            if kind == "sites":
+                ldap = await conn.getLdap()
+                base = f"CN=Sites,{ldap.configNC}"
             label = "domain trusts" if kind == "trusts" else f"{kind} DACLs"
             print(f"[*] Collecting {label} from {host}", file=sys.stderr)
             try:
-                async for entry in bloodyad_search(conn, base="DOMAIN", filter=ldap_filter,
+                async for entry in bloodyad_search(conn, base=base, filter=ldap_filter,
                                                    attr=attrs, resolve_sd=True):
                     entries.append(json_value(entry))
             except NoResultError as exc:
-                if kind == "trusts" and exc.filter == ldap_filter:
-                    print("[i] No domain trusts found; continuing", file=sys.stderr)
+                optional_types = {"trusts", "sites", "foreign-security-principals"}
+                if kind in optional_types and exc.filter == ldap_filter:
+                    print(f"[i] No {kind.replace('-', ' ')} found; continuing", file=sys.stderr)
                     continue
                 raise
         if include_adcs:

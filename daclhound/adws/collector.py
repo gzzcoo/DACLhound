@@ -192,9 +192,17 @@ class ADWSCollector:
         try:
             for kind in sorted(requested):
                 _, ldap_filter = type_map[kind]
+                base = (f"CN=Sites,{self.rootdse['configurationNamingContext']}"
+                        if kind == "sites" else base_dn)
                 print(f"[*] Collecting {kind} through ADWS from {self.host}", file=sys.stderr)
-                for item in self._search(client, base_dn, ldap_filter, attributes):
-                    entries.append(_entry(item, attributes, self.guid_names))
+                try:
+                    for item in self._search(client, base, ldap_filter, attributes):
+                        entries.append(_entry(item, attributes, self.guid_names))
+                except Exception as exc:
+                    if kind in {"sites", "foreign-security-principals"} and "no enumeration result" in str(exc).casefold():
+                        print(f"[i] No {kind.replace('-', ' ')} found; continuing", file=sys.stderr)
+                        continue
+                    raise
             if include_adcs:
                 self._collect_adcs(client, entries)
         finally:

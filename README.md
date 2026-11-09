@@ -42,7 +42,7 @@ DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' 
 
 By default, the graph is saved using the domain name in the current directory: the first collection creates `lab.local.json`, and later collections use the next available name, such as `lab.local_1.json`. Use `--output custom-name.json` only when you want to choose a custom path; existing files get the same numeric suffix. Pass `--overwrite` only when you want to replace the selected output file.
 
-The collector is read-only. By default it collects users, groups, computers, OUs, containers, GPOs, the domain, and ADCS data. Use `--types` to limit directory object types:
+The collector is read-only. By default it collects users, groups, computers, OUs, containers, GPOs, the domain, trusts, Sites from the Configuration partition, Foreign Security Principals, and ADCS data. Use `--types` to limit directory object types:
 
 ```sh
 DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --types users,groups
