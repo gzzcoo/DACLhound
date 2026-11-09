@@ -35,7 +35,7 @@ pipx upgrade DACLhound
 ## Collect a graph
 
 ```sh
-DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1
+daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1
 ```
 
 `--host` accepts the domain controller's FQDN or IP address. Use the FQDN when authenticating with Kerberos.
@@ -45,7 +45,7 @@ By default, the graph is saved using the domain name in the current directory: t
 The collector is read-only. By default it collects users, groups, computers, OUs, containers, GPOs, the domain, and ADCS data. Use `--types` to limit directory object types:
 
 ```sh
-DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --types users,groups
+daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --types users,groups
 ```
 
 Use `--no-adcs` to skip ADCS collection. The graph uses the domain-based default filename described above. Add `--raw-output` to keep the collector's raw entries as well.
@@ -59,9 +59,9 @@ LDAP visibility depends on the account used for collection. If you have multiple
 Run a quick console triage of saved graphs without opening the web viewer. `analyze` reports domain context, Domain Admins, effective permission paths, Kerberos roasting, delegations, ADCS findings, trusts, and other useful relationships. You can analyze several domains together; duplicate objects and relationships are combined:
 
 ```sh
-DACLhound.py analyze lab.local.json
-DACLhound.py analyze lab.local.json megacorp.local.json
-DACLhound.py analyze lab.local.json --from-user 'alice@lab.local'
+daclhound analyze lab.local.json
+daclhound analyze lab.local.json megacorp.local.json
+daclhound analyze lab.local.json --from-user 'alice@lab.local'
 ```
 
 By default, `analyze` traces effective permission paths from collected users, resolves trustees by SID across all supplied JSON files, and groups paths that share a trustee group. It also reports direct rights, domain membership, delegation, roasting, ADCS, and GPO link findings in prioritized sections. Use `--from-user` to focus the paths on one account. Output is colorized by default; use `--color never` to disable colors. This is a quick way to review findings from the terminal when you do not need the web viewer.
@@ -71,7 +71,7 @@ By default, `analyze` traces effective permission paths from collected users, re
 ### NTLM password
 
 ```sh
-DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1
+daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1
 ```
 
 ### NTLM pass-the-hash
@@ -79,7 +79,7 @@ DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' 
 Pass the NT hash directly, or use `LMHASH:NTHASH` when you have both hashes:
 
 ```sh
-DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -hashes '613a519b5b0ef57c07bc6395aa1aff14' --dc-ip 192.168.2.1
+daclhound collect --host DC01.lab.local -d lab.local -u 'user' -hashes '613a519b5b0ef57c07bc6395aa1aff14' --dc-ip 192.168.2.1
 ```
 
 ### Kerberos
@@ -91,13 +91,13 @@ an explicit flag for ccache authentication.
 **Password:**
 
 ```sh
-DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' -k --dc-ip 192.168.2.1
+daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' -k --dc-ip 192.168.2.1
 ```
 
 **Pass-the-hash (NT hash used as the Kerberos RC4 key):**
 
 ```sh
-DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -hashes '613a519b5b0ef57c07bc6395aa1aff14' -k --dc-ip 192.168.2.1
+daclhound collect --host DC01.lab.local -d lab.local -u 'user' -hashes '613a519b5b0ef57c07bc6395aa1aff14' -k --dc-ip 192.168.2.1
 ```
 
 If both hashes are available, use `-hashes '<LMHASH>:<NTHASH>'`.
@@ -106,10 +106,10 @@ If both hashes are available, use `-hashes '<LMHASH>:<NTHASH>'`.
 
 ```sh
 # Use the current KRB5CCNAME
-DACLhound.py collect --host DC01.lab.local -d lab.local -k -no-pass --dc-ip 192.168.2.1
+daclhound collect --host DC01.lab.local -d lab.local -k -no-pass --dc-ip 192.168.2.1
 
 # Or provide a ccache file directly
-DACLhound.py collect --host DC01.lab.local -d lab.local -k user.ccache -no-pass --dc-ip 192.168.2.1
+daclhound collect --host DC01.lab.local -d lab.local -k user.ccache -no-pass --dc-ip 192.168.2.1
 ```
 
 An AES key enables Kerberos automatically: use `-aesKey '<AESKEY>'` (with `-u`). Add `-s` to use LDAPS.
@@ -119,17 +119,17 @@ An AES key enables Kerberos automatically: use `-aesKey '<AESKEY>'` (with `-u`).
 Run the viewer in the foreground and stop it with `Ctrl+C`:
 
 ```sh
-DACLhound.py graph --input lab.local.json
+daclhound graph --input lab.local.json
 ```
 
 Or manage the viewer as a background service:
 
-- Start the viewer without preloading a graph: `DACLhound.py graph start`.
-- Start the viewer and load a graph immediately: `DACLhound.py graph start --input lab.local.json`.
-- Check whether the background viewer is running: `DACLhound.py graph status`.
-- Stop the background viewer: `DACLhound.py graph stop`.
+- Start the viewer without preloading a graph: `daclhound graph start`.
+- Start the viewer and load a graph immediately: `daclhound graph start --input lab.local.json`.
+- Check whether the background viewer is running: `daclhound graph status`.
+- Stop the background viewer: `daclhound graph stop`.
 
-The server listens on `127.0.0.1:8765` by default. Uploaded JSON files stay in memory while the server is running and are discarded when it stops. Use `--bind` and `--port` to change the listener. Run `DACLhound.py collect --help` or `DACLhound.py graph --help` for all options.
+The server listens on `127.0.0.1:8765` by default. Uploaded JSON files stay in memory while the server is running and are discarded when it stops. Use `--bind` and `--port` to change the listener. Run `daclhound collect --help` or `daclhound graph --help` for all options.
 
 ## License
 
