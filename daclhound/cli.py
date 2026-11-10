@@ -18,7 +18,7 @@ from .collector import (
     collect_with_bloodyad,
     ensure_bloodyad_available,
 )
-from .common import classify, stable_id
+from .common import classify, scalar, stable_id
 from .graph_control import (
     _graph_daemon_matches,
     _graph_pid_file,
@@ -42,6 +42,22 @@ def _path_exists(path: Path) -> bool:
 def _default_output_path(domain: str) -> Path:
     label = re.sub(r"[^a-zA-Z0-9.-]+", "_", domain.strip().rstrip(".").lower()).strip("._-")
     return Path(f"{label or 'daclgraph'}.json")
+
+
+def _domain_from_dn(dn: str) -> str:
+    labels = [part.split("=", 1)[1].strip() for part in dn.split(",")
+              if "=" in part and part.split("=", 1)[0].strip().casefold() == "dc"]
+    return ".".join(labels)
+
+
+def _target_domain(entries: list[dict[str, Any]], fallback: str) -> str:
+    """Prefer the queried domain naming context over the authentication realm."""
+    candidates: dict[str, int] = {}
+    for entry in entries:
+        name = _domain_from_dn(scalar(entry.get("distinguishedName")))
+        if name:
+            candidates[name] = candidates.get(name, 0) + 1
+    return max(candidates, key=candidates.get) if candidates else fallback
 
 
 def _resolve_output_paths(
@@ -242,7 +258,7 @@ def main() -> int:
             ap.error("--no-adcs cannot be combined with 'adcs' in -t/--types")
     include_adcs = not ns.no_adcs
     selected = {type_map[t][0] for t in requested_objects}
-    attrs = ("distinguishedName,sAMAccountName,objectClass,objectSid,sIDHistory,nTSecurityDescriptor,memberOf,member,altSecurityIdentities,description,"
+    attrs = ("distinguishedName,sAMAccountName,objectClass,objectSid,sIDHistory,nTSecurityDescriptor,memberOf,member,altSecurityIdentities,description,whenCreated,pwdLastSet,lastLogon,lastLogonTimestamp,"
              "primaryGroupID,cn,name,displayName,gPLink,gPOptions,gPCFileSysPath,gPCWQLFilter,versionNumber,"
              "userAccountControl,msDS-AllowedToDelegateTo,msDS-AllowedToActOnBehalfOfOtherIdentity,msDS-GroupMSAMembership,"
              "servicePrincipalName,dNSHostName,adminCount,trustPartner,trustDirection,trustType,trustAttributes,securityIdentifier")
@@ -333,8 +349,9 @@ def main() -> int:
     for e in raw_entries:
         unique[stable_id(e) or json.dumps(e, sort_keys=True)] = e
     raw_entries = list(unique.values())
-    dataset = build_dataset(raw_entries, ns.domain, selected)
-    out, raw_path = _resolve_output_paths(ns.domain, ns.output, ns.raw_output, ns.overwrite)
+    target_domain = _target_domain(raw_entries, ns.domain)
+    dataset = build_dataset(raw_entries, target_domain, selected)
+    out, raw_path = _resolve_output_paths(target_domain, ns.output, ns.raw_output, ns.overwrite)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(dataset, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if raw_path is not None:

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .adcs import adcs_assessment, add_adcs_findings
-from .common import (attr, canonical_sid, classify, int_attr, object_types, scalar,
+from .common import (WELL_KNOWN_SID_NAMES, attr, canonical_sid, classify, int_attr, object_types, scalar,
                      stable_id, trustee_display_name, trustees)
 
 
@@ -258,6 +258,11 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
     entries_by_node_id: dict[str, dict[str, Any]] = {}
     for entry in entries:
         kind = classify(entry)
+        sid = canonical_sid(attr(entry, "objectSid"))
+        # ForeignSecurityPrincipal is also used to materialize several Windows
+        # well-known SIDs. Those are trustees, not foreign domain principals.
+        if kind == "foreign_security_principal" and sid.upper() in WELL_KNOWN_SID_NAMES:
+            continue
         if kind not in selected:
             continue
         descriptor = entry.get("nTSecurityDescriptor") or {}
@@ -314,6 +319,10 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                       "primaryGroupID": scalar(entry.get("primaryGroupID")),
                       "samAccountName": sam, "displayName": display_name,
                       "description": scalar(attr(entry, "description")),
+                      "whenCreated": scalar(attr(entry, "whenCreated")),
+                      "pwdLastSet": scalar(attr(entry, "pwdLastSet")),
+                      "lastLogon": scalar(attr(entry, "lastLogon")),
+                      "lastLogonTimestamp": scalar(attr(entry, "lastLogonTimestamp")),
                       "gPLink": scalar(entry.get("gPLink")),
                       "gPOptions": scalar(entry.get("gPOptions")),
                       "gPCFileSysPath": scalar(entry.get("gPCFileSysPath")),
