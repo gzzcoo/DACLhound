@@ -201,7 +201,7 @@ function focusCameraOnNode(n){if(cameraAnimation)cancelAnimationFrame(cameraAnim
 const graphSearchInput=document.querySelector('#graphSearchInput');graphSearchInput.addEventListener('input',()=>{if(!graphSearchInput.value.trim()){locatedNodeId=null;filter()}renderGraphSearchResults()});graphSearchInput.addEventListener('keydown',event=>{if(event.key==='Enter'){const first=document.querySelector('#graphSearchResults .path-suggestion');if(first){event.preventDefault();first.click()}}if(event.key==='Escape'){document.querySelector('#graphSearchResults').hidden=true;graphSearchInput.setAttribute('aria-expanded','false')}});document.addEventListener('pointerdown',event=>{if(!event.target.closest('.graph-search')){const menu=document.querySelector('#graphSearchResults');if(menu){menu.hidden=true;graphSearchInput.setAttribute('aria-expanded','false')}}});
 
 function clearPath(){pathHighlight=null;selected=null;locatedNodeId=null;document.querySelector('#clearPath').disabled=true;document.querySelector('#resetGraph').hidden=true;document.querySelector('#pathStatus').textContent='Choose a source and target.';filter();fit()}
-function findShortestPath(){const sourceId=document.querySelector('#pathSource').dataset.nodeId,targetId=document.querySelector('#pathTarget').dataset.nodeId,status=document.querySelector('#pathStatus');if(!sourceId||!targetId){status.textContent='Choose both objects from the suggestions.';return}if(sourceId===targetId){status.textContent='Choose two different objects.';return}const adjacency=new Map(),searchEdges=largeGraphMode?pathSearchEdges:visibleEdges;for(const edge of searchEdges){if(edge.traversable===false)continue;if(!adjacency.has(edge.source))adjacency.set(edge.source,[]);adjacency.get(edge.source).push(edge)}const queue=[sourceId],previous=new Map([[sourceId,null]]);for(let i=0;i<queue.length&&!previous.has(targetId);i++){for(const edge of adjacency.get(queue[i])||[]){if(previous.has(edge.target))continue;previous.set(edge.target,{node:queue[i],edge});queue.push(edge.target);if(edge.target===targetId)break}}if(!previous.has(targetId)){status.textContent='No directed path found with the current filters.';return}const nodes=new Set([targetId]),edgeIds=new Set();let cursor=targetId;while(cursor!==sourceId){const step=previous.get(cursor);if(!step)break;for(const parallel of searchEdges)if(parallel.source===step.node&&parallel.target===cursor&&parallel.kind!=='membership')edgeIds.add(parallel.id);nodes.add(step.node);cursor=step.node}pathHighlight={nodes,edgeIds};selected=null;locatedNodeId=null;document.querySelector('#clearPath').disabled=false;document.querySelector('#resetGraph').hidden=false;status.textContent=`Path view · ${edgeIds.size} edge${edgeIds.size===1?'':'s'} · use Reset graph to restore all objects.`;filter();setDetailsOpen(false);setMenuOpen(false);fit()}
+function findShortestPath(){const sourceId=document.querySelector('#pathSource').dataset.nodeId,targetId=document.querySelector('#pathTarget').dataset.nodeId,status=document.querySelector('#pathStatus');if(!sourceId||!targetId){status.textContent='Choose both objects from the suggestions.';return}if(sourceId===targetId){status.textContent='Choose two different objects.';return}const adjacency=new Map(),searchEdges=largeGraphMode?pathSearchEdges:visibleEdges;for(const edge of searchEdges){if(edge.traversable===false)continue;if(!adjacency.has(edge.source))adjacency.set(edge.source,[]);adjacency.get(edge.source).push(edge)}const queue=[sourceId],previous=new Map([[sourceId,null]]);for(let i=0;i<queue.length&&!previous.has(targetId);i++){for(const edge of adjacency.get(queue[i])||[]){if(previous.has(edge.target))continue;previous.set(edge.target,{node:queue[i],edge});queue.push(edge.target);if(edge.target===targetId)break}}if(!previous.has(targetId)){status.textContent='No directed path found with the current filters.';return}const nodes=new Set([targetId]),edgeIds=new Set();let cursor=targetId;while(cursor!==sourceId){const step=previous.get(cursor);if(!step)break;for(const parallel of searchEdges)if(parallel.source===step.node&&parallel.target===cursor&&(step.edge.kind==='membership'?parallel.id===step.edge.id:parallel.kind!=='membership'))edgeIds.add(parallel.id);nodes.add(step.node);cursor=step.node}pathHighlight={nodes,edgeIds};selected=null;locatedNodeId=null;document.querySelector('#clearPath').disabled=false;document.querySelector('#resetGraph').hidden=false;status.textContent=`Path view · ${edgeIds.size} edge${edgeIds.size===1?'':'s'} · use Reset graph to restore all objects.`;filter();setDetailsOpen(false);setMenuOpen(false);fit()}
 function canvasNodeLabel(n,maxWidth){let label=nodeLabel(n);if(ctx.measureText(label).width<=maxWidth)return label;while(label.length>8&&ctx.measureText(label+'…').width>maxWidth)label=label.slice(0,-1);return label+'…'}
 function graphTypeLabel(n){return ({user:'User',group:'Group',computer:'Computer',ou:'Organizational Unit',container:'Container',site:'Site',foreign_security_principal:'Foreign Security Principal',gpo:'Group Policy Object',domain:'Domain',trusted_domain:'Trusted Domain',trustee:'Trustee',adcs_finding:'ADCS Finding',service:'Service Principal',cert_template:'Certificate Template',adcs_policy:'Issuance Policy',enterprise_ca:'Enterprise CA',root_ca:'Root CA',ntauth_store:'NTAuth Store'}[n.type]||'Object')}
 /* Font Awesome Free icons by Fonticons, Inc. (CC BY 4.0): https://fontawesome.com/license/free . Glyphs adapted for canvas rendering; node mappings/colors follow SpecterOps BloodHound. */
@@ -233,7 +233,7 @@ function graphNodeIdentity(node,fallbackDomain,entryKey){
  const sid=String(node.sid||'').trim().toUpperCase();
  const dn=String(node.dn||'').trim().toLowerCase();
  if(node.type==='trustee')return `trustee:${domain}:${sid||String(node.name||node.id).trim().toLowerCase()}`;
- if(/^S-\d-\d+(?:-\d+)+$/.test(sid))return `directory:${domain}:sid:${sid}`;
+ if(/^S-\d-\d+(?:-\d+)+$/.test(sid))return node.type==='foreign_security_principal'?`directory:${domain}:fsp:sid:${sid}`:`directory:${domain}:sid:${sid}`;
  if(dn)return `directory:${domain}:dn:${dn}`;
  const stable=String(node.id||node.name||'').trim().toLowerCase();
  return `directory:${domain}:${node.type||'object'}:${stable||entryKey}`
@@ -303,6 +303,19 @@ function mergeDatasets(entries){
    const incoming={...node,id,domain:nodeDomain(node,entry.data.domain)};
    combinedNodes.set(id,combinedNodes.has(id)?mergeGraphNode(combinedNodes.get(id),incoming):incoming)
   }
+ }
+ const fspRemaps=new Map();
+ for(const [id,node] of combinedNodes){
+  if(node.type!=='foreign_security_principal')continue;
+  const sid=String(node.sid||'').trim().toUpperCase();
+  if(!/^S-\d-\d+(?:-\d+)+$/.test(sid))continue;
+  const matches=[...(sidTargets.get(sid)||[])].filter(candidateId=>combinedNodes.get(candidateId)?.type!=='foreign_security_principal');
+  if(matches.length===1){fspRemaps.set(id,matches[0]);combinedNodes.delete(id)}
+ }
+ if(fspRemaps.size){
+  for(const ids of nodeIdsByDataset.values())for(const [sourceId,targetId] of ids)if(fspRemaps.has(targetId))ids.set(sourceId,fspRemaps.get(targetId));
+  sidTargets.clear();
+  for(const [id,node] of combinedNodes){const sid=String(node.sid||'').trim().toUpperCase();if(/^S-\d-\d+(?:-\d+)+$/.test(sid)){if(!sidTargets.has(sid))sidTargets.set(sid,new Set());sidTargets.get(sid).add(id)}}
  }
  for(const entry of ordered){
   const ids=nodeIdsByDataset.get(entry.key);
