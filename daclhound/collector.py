@@ -11,6 +11,7 @@ import os
 import re
 import socket
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -48,27 +49,74 @@ def patch_badldap_rfc4515_compat() -> None:
 
 
 def request_tgt_ccache_hex(username: str, domain: str, password: str, kdc_host: str) -> str:
-    """Request a TGT with Impacket and return its ccache as hex for bloodyAD.
+    """Request a password-based TGT with Impacket, retrying on KDC clock skew.
 
-    Impacket first asks the KDC for its pre-authentication salt. This supports
-    accounts whose AES salt differs from kerbad's default realm+username salt.
-    The ccache stays in memory and is passed to bloodyAD's Python API.
+    Impacket first asks the KDC for the account's pre-authentication salt.
+    Keep this path so AES accounts with non-default salts continue to work.
+    The retry applies the KDC-provided time offset only inside Impacket's
+    Kerberos request code; it never changes the operating-system clock.
     """
-    from impacket.krb5 import constants
+    from types import SimpleNamespace
+
+    from impacket.krb5 import constants, kerberosv5
     from impacket.krb5.ccache import CCache
-    from impacket.krb5.kerberosv5 import getKerberosTGT
+    from impacket.krb5.kerberosv5 import KerberosError, getKerberosTGT
     from impacket.krb5.types import Principal
 
     principal = Principal(username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
-    tgt, _cipher, old_session_key, session_key = getKerberosTGT(
-        clientName=principal,
-        password=password,
-        domain=domain.upper(),
-        lmhash=b"",
-        nthash=b"",
-        aesKey=None,
-        kdcHost=kdc_host,
-    )
+
+    def get_tgt() -> tuple[bytes, Any, Any, Any]:
+        return getKerberosTGT(
+            clientName=principal,
+            password=password,
+            domain=domain.upper(),
+            lmhash=b"",
+            nthash=b"",
+            aesKey=None,
+            kdcHost=kdc_host,
+        )
+
+    try:
+        tgt, _cipher, old_session_key, session_key = get_tgt()
+    except KerberosError as exc:
+        if exc.getErrorCode() != constants.ErrorCodes.KRB_AP_ERR_SKEW.value:
+            raise
+
+        packet = exc.getErrorPacket()
+        try:
+            server_time_raw = packet["stime"].asOctets().decode("ascii")
+            server_time = dt.datetime.strptime(server_time_raw, "%Y%m%d%H%M%SZ").replace(
+                tzinfo=dt.timezone.utc
+            )
+        except (KeyError, AttributeError, UnicodeDecodeError, ValueError) as parse_exc:
+            raise RuntimeError(
+                "KDC reported Kerberos clock skew but did not provide a usable server time"
+            ) from parse_exc
+
+        skew = server_time - dt.datetime.now(dt.timezone.utc)
+        print(
+            f"[!] Kerberos clock skew detected. Applying in-memory offset {skew}; retrying.",
+            file=sys.stderr,
+        )
+
+        real_datetime = dt.datetime
+
+        class OffsetDateTime(real_datetime):
+            @classmethod
+            def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:
+                return real_datetime.now(tz) + skew
+
+        original_datetime_module = kerberosv5.datetime
+        kerberosv5.datetime = SimpleNamespace(
+            datetime=OffsetDateTime,
+            timezone=dt.timezone,
+            timedelta=dt.timedelta,
+        )
+        try:
+            tgt, _cipher, old_session_key, session_key = get_tgt()
+        finally:
+            kerberosv5.datetime = original_datetime_module
+
     ccache = CCache()
     ccache.fromTGT(tgt, old_session_key, session_key)
     return ccache.getData().hex()
@@ -133,6 +181,13 @@ def kerberos_kdc_for_user_realm(domain: str, target_host: str, target_dc_ip: str
         ) from exc
 
 
+def _status(marker: str, message: str, color: str) -> str:
+    """Color collector progress markers when stderr is an interactive terminal."""
+    if not sys.stderr.isatty():
+        return f"[{marker}] {message}"
+    return f"\x1b[{color}m[{marker}]\x1b[0m {message}"
+
+
 def json_value(value: Any) -> Any:
     """Match bloodyAD's JSON conversion for values returned by its search renderer."""
     if isinstance(value, dict):
@@ -185,7 +240,7 @@ async def collect_with_bloodyad(
                 ldap = await conn.getLdap()
                 base = f"CN=Sites,{ldap.configNC}"
             label = "domain trusts" if kind == "trusts" else f"{kind} DACLs"
-            print(f"[*] Collecting {label} from {host}", file=sys.stderr)
+            print(_status("*", f"Collecting {label} from {host}", "1;34"), file=sys.stderr)
             try:
                 async for entry in bloodyad_search(conn, base=base, filter=ldap_filter,
                                                    attr=attrs, resolve_sd=True):
@@ -212,7 +267,7 @@ async def collect_with_bloodyad(
                 async def collect_adcs(label: str, base: str, ldap_filter: str,
                                        kind: str, query_attrs: str = adcs_attrs,
                                        resolve_sd: bool = True) -> None:
-                    print(f"[*] Collecting ADCS {label} from {host}", file=sys.stderr)
+                    print(_status("*", f"Collecting ADCS {label} from {host}", "1;34"), file=sys.stderr)
                     try:
                         async for entry in bloodyad_search(
                             conn, base=base, filter=ldap_filter,
@@ -250,6 +305,134 @@ async def collect_with_bloodyad(
     finally:
         await conn.closeLdap()
     return entries
+
+
+def collect_host_service_checks(
+    entries: list[dict[str, Any]], *, username: str, domain: str,
+    password: str = "", hashes: str = "", aes_key: str = "",
+    kerberos: bool = False, ccache: str | None = None, kdc_host: str = "",
+    dns_server: str | None = None,
+    timeout: int = 3, workers: int = 8,
+) -> None:
+    """Collect SMB signing policy and the WebClient DAV pipe from computer nodes.
+
+    SMB signing is read from the unauthenticated protocol negotiation. WebClient
+    is identified by opening its DAV RPC named pipe in IPC$, matching the
+    protocol-level check used by common SMB collectors without invoking one.
+    """
+    computers: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        if classify(entry) != "computer":
+            continue
+        hostname = scalar(attr(entry, "dNSHostName")).strip().rstrip(".")
+        if hostname:
+            computers.setdefault(hostname.casefold(), []).append(entry)
+    if not computers:
+        print("[i] Host service checks skipped: no computer DNS names were collected", file=sys.stderr)
+        return
+    try:
+        from impacket import nt_errors
+        from impacket.smbconnection import SMBConnection, SessionError
+        from impacket.smb3structs import (
+            FILE_READ_DATA, SMB2_DIALECT_30, SMB2_NEGOTIATE_SIGNING_REQUIRED,
+        )
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "--host-checks requires Impacket in the active Python environment; "
+            "run DACLhound.py with .release-venv/bin/python "
+            f"(missing module: {exc.name})"
+        ) from exc
+
+    old_ccache = os.environ.get("KRB5CCNAME")
+    if kerberos and ccache:
+        os.environ["KRB5CCNAME"] = ccache
+    lmhash, nthash = "", ""
+    if hashes:
+        if ":" in hashes:
+            lmhash, nthash = hashes.split(":", 1)
+        else:
+            nthash = hashes
+
+    def check(host: str) -> tuple[str, bool | None, bool | None, str | None]:
+        connection = None
+        signing: bool | None = None
+        webclient: bool | None = None
+        problem = None
+        try:
+            remote_host = host
+            if dns_server:
+                try:
+                    import dns.resolver
+                    resolver = dns.resolver.Resolver(configure=False)
+                    resolver.nameservers = [dns_server]
+                    resolver.timeout = timeout
+                    resolver.lifetime = timeout
+                    address = None
+                    for record_type in ("A", "AAAA"):
+                        try:
+                            answer = resolver.resolve(host, record_type)
+                            address = str(answer[0])
+                            break
+                        except Exception:
+                            continue
+                    if address:
+                        remote_host = address
+                    else:
+                        remote_host = socket.getaddrinfo(host, 445, type=socket.SOCK_STREAM)[0][4][0]
+                except ImportError:
+                    remote_host = socket.getaddrinfo(host, 445, type=socket.SOCK_STREAM)[0][4][0]
+            connection = SMBConnection(remoteName=host, remoteHost=remote_host, timeout=timeout)
+            dialect = connection.getDialect()
+            if isinstance(dialect, int) and dialect >= SMB2_DIALECT_30:
+                security_mode = connection.getSMBServer()._Connection.get("ServerSecurityMode")
+                signing = (bool(security_mode & SMB2_NEGOTIATE_SIGNING_REQUIRED)
+                           if security_mode is not None else None)
+            else:
+                signing = bool(connection.isSigningRequired())
+            try:
+                if kerberos:
+                    connection.kerberosLogin(username, password, domain, lmhash, nthash,
+                                             aes_key, kdc_host or None)
+                else:
+                    connection.login(username, password, domain, lmhash, nthash)
+                tree_id = connection.connectTree("IPC$")
+                file_id = connection.openFile(tree_id, "DAV RPC Service", desiredAccess=FILE_READ_DATA)
+                connection.closeFile(tree_id, file_id)
+                webclient = True
+            except SessionError as exc:
+                if exc.getErrorCode() == nt_errors.STATUS_OBJECT_NAME_NOT_FOUND:
+                    webclient = False
+                else:
+                    problem = f"WebClient pipe check returned SMB status {exc.getErrorCode():#x}"
+            except Exception as exc:
+                problem = f"WebClient pipe check failed ({type(exc).__name__}: {exc})"
+        except Exception as exc:
+            problem = f"SMB probe failed ({type(exc).__name__}: {exc})"
+        finally:
+            if connection is not None:
+                try:
+                    connection.logoff()
+                except Exception:
+                    pass
+        return host, signing, webclient, problem
+
+    print(_status("*", f"Checking SMB signing and WebClient on {len(computers)} computers", "1;34"), file=sys.stderr)
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {pool.submit(check, host): host for host in computers}
+            for future in as_completed(futures):
+                host, signing, webclient, problem = future.result()
+                for entry in computers[host.casefold()]:
+                    entry["daclgraphSmbSigningRequired"] = signing
+                    entry["daclgraphWebClientRunning"] = webclient
+                if problem:
+                    print(f"[i] {host}: {problem}", file=sys.stderr)
+    finally:
+        if kerberos and ccache:
+            if old_ccache is None:
+                os.environ.pop("KRB5CCNAME", None)
+            else:
+                os.environ["KRB5CCNAME"] = old_ccache
 
 
 def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]) -> dict[str, Any]:
@@ -296,6 +479,13 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
             for part in re.split(r"[;|,]", scalar(flag))
             if part.strip()
         }
+        uac_numeric = None
+        for flag in uac:
+            value = scalar(flag).strip()
+            if re.fullmatch(r"(?:0x[0-9a-f]+|[0-9]+)", value, re.IGNORECASE):
+                uac_numeric = int(value, 16 if value.lower().startswith("0x") else 10)
+                break
+        uac_has = lambda flag, bit: flag in uac_flags or (uac_numeric is not None and bool(uac_numeric & bit))
         delegate_to = attr(entry, "msDS-AllowedToDelegateTo", []) or []
         if isinstance(delegate_to, str):
             delegate_to = [delegate_to]
@@ -305,9 +495,11 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
         service_principal_names = [scalar(value).strip() for value in service_principal_names
                                    if scalar(value).strip()]
         admin_count = scalar(attr(entry, "adminCount")).strip().casefold() in {"1", "true"}
-        no_preauth = bool({"DONT_REQ_PREAUTH", "DONT_REQUIRE_PREAUTH"} & uac_flags)
+        disabled = "ACCOUNTDISABLE" in uac_flags or uac_has("ACCOUNTDISABLE", 0x2)
+        no_preauth = (bool({"DONT_REQ_PREAUTH", "DONT_REQUIRE_PREAUTH"} & uac_flags)
+                      or uac_has("DONT_REQ_PREAUTH", 0x400000))
         members = entry.get("member", [])
-        if kind == "group" and (sam or name).casefold() in {"domain users", "enterprise admins"}:
+        if kind == "group" and (sam or name).casefold() == "domain users":
             members = []
         nodes.append({"id": node_id, "name": name, "type": kind, "dn": dn,
                       "sid": scalar(entry.get("objectSid")), "owner": scalar(descriptor.get("Owner")),
@@ -319,6 +511,13 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                       "primaryGroupID": scalar(entry.get("primaryGroupID")),
                       "samAccountName": sam, "displayName": display_name,
                       "description": scalar(attr(entry, "description")),
+                      "scriptPath": scalar(attr(entry, "scriptPath")),
+                      "operatingSystem": scalar(attr(entry, "operatingSystem")),
+                      "operatingSystemVersion": scalar(attr(entry, "operatingSystemVersion")),
+                      "smbSigningRequired": entry.get("daclgraphSmbSigningRequired"),
+                      "webClientRunning": entry.get("daclgraphWebClientRunning"),
+                      "isGmsa": kind == "user" and "msds-groupmanagedserviceaccount" in {scalar(value).casefold() for value in (attr(entry, "objectClass", []) or []) if scalar(value)},
+                      "homeDirectory": scalar(attr(entry, "homeDirectory")),
                       "whenCreated": scalar(attr(entry, "whenCreated")),
                       "pwdLastSet": scalar(attr(entry, "pwdLastSet")),
                       "lastLogon": scalar(attr(entry, "lastLogon")),
@@ -329,11 +528,14 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                       "gPCWQLFilter": scalar(entry.get("gPCWQLFilter")),
                       "versionNumber": scalar(entry.get("versionNumber")),
                       "userAccountControl": sorted(uac_flags),
+                      "markedSensitive": uac_has("NOT_DELEGATED", 0x100000) if uac_present else None,
+                      "passwordNotRequired": uac_has("PASSWD_NOTREQD", 0x20) if uac_present else None,
+                      "passwordNeverExpires": uac_has("DONT_EXPIRE_PASSWORD", 0x10000) if uac_present else None,
                       "adminCount": admin_count,
                       "servicePrincipalNames": service_principal_names,
-                      "asrepRoastable": kind == "user" and no_preauth and "ACCOUNTDISABLE" not in uac_flags,
-                      "kerberoastable": kind == "user" and bool(service_principal_names) and "ACCOUNTDISABLE" not in uac_flags,
-                      "enabled": ("ACCOUNTDISABLE" not in uac_flags) if uac_present and kind in {"user", "computer"} else None,
+                      "asrepRoastable": kind == "user" and no_preauth and not disabled,
+                      "kerberoastable": kind == "user" and bool(service_principal_names) and not disabled,
+                      "enabled": not disabled if uac_present and kind in {"user", "computer"} else None,
                       "unconstrainedDelegation": "TRUSTED_FOR_DELEGATION" in uac_flags,
                       "protocolTransition": "TRUSTED_TO_AUTH_FOR_DELEGATION" in uac_flags,
                       "allowedToDelegateTo": [scalar(spn) for spn in delegate_to if scalar(spn)],
@@ -614,7 +816,7 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
         if not member or not group or group.get("type") != "group":
             return
         group_name = (scalar(group.get("samAccountName")) or scalar(group.get("name"))).casefold()
-        if group_name in {"domain users", "enterprise admins"}:
+        if group_name == "domain users":
             return
         membership_pairs.add((member_id, group_id))
         edges.append({"id": f"member::{member_id}::{group_id}", "kind": "membership",
@@ -675,11 +877,16 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
         add_adcs_findings(entries, nodes, edges, object_ids, domain)
     adcs_entries_present = any(entry.get("__daclgraph_adcs_kind") for entry in entries)
     adcs_report = adcs_assessment(entries, edges) if adcs_entries_present else []
+    machine_account_quota = next((scalar(attr(entry, "ms-DS-MachineAccountQuota"))
+                                  for entry in entries
+                                  if classify(entry) == "domain"
+                                  and attr(entry, "ms-DS-MachineAccountQuota") is not None), None)
     return {"schema": "daclgraph/v1", "domain": domain,
             "collectedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
             "filters": {"types": sorted(selected)}, "nodes": nodes, "edges": edges,
             "adcsAssessment": adcs_report,
             "stats": {"objects": len([n for n in nodes if n["type"] not in {"trustee", "adcs_finding"}]),
+                      "machineAccountQuota": machine_account_quota,
                       "trustees": len([n for n in nodes if n["type"] == "trustee"]),
             "aces": len({(e["target"], e.get("descriptorAttribute", "nTSecurityDescriptor"), e["aceIndex"])
                          for e in edges if e.get("kind") == "dacl" or "aceIndex" in e}),

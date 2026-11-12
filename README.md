@@ -1,22 +1,12 @@
 # DACLhound
 
-DACLhound collects and analyzes Active Directory permissions over LDAP or native ADWS. Explore the results in the interactive graph viewer or run `analyze` for a quick terminal overview.
+DACLhound collects and analyzes Active Directory permissions over LDAP or native ADWS. Review DACLs and effective permission paths in an interactive graph, or triage saved data from the command line.
 
-DACLhound is built for Hack The Box (HTB) and similar hands-on labs. It works best with small and medium-sized domains; performance in very large enterprise environments has not been evaluated.
-
-Unlike BloodHound CE's modeled graph edges, DACLhound preserves the collected DACL details and exposes individual `Write-Property` rights by attribute (for example, `WriteLogonHours` or `WriteUserAccountControl`, etc.). This helps inspect the specific property and ACE behind a relationship.
-
-## Development status
-
-DACLhound is still under active development. I plan to update it daily as I continue testing it, fixing bugs, and improving the results. You may encounter issues, and feedback or bug reports are welcome.
+Unlike BloodHound CE's modeled graph edges, DACLhound preserves the collected DACL details and exposes individual `Write-Property` rights by attribute (for example, `WriteLogonHours` or `WriteUserAccountControl`). This helps inspect the specific property and ACE behind a relationship.
 
 ![DACLhound graph example](https://raw.githubusercontent.com/gzzcoo/DACLhound/main/DACLhound/DACLhound.png)
 
-## Demo
-
-https://github.com/user-attachments/assets/62a531d9-c3f0-47d3-aab0-d7fef8db28d1
-
-The demo walks through collecting a domain and opening the graph viewer. It also shows selecting an object to focus on its permission paths, hiding objects, and setting start and end nodes to reveal a path.
+[Watch the demo](https://github.com/user-attachments/assets/62a531d9-c3f0-47d3-aab0-d7fef8db28d1)
 
 ## Install
 
@@ -26,45 +16,59 @@ Python 3.10 or newer is required.
 pipx install DACLhound
 ```
 
-Upgrade later with:
+Upgrade with `pipx upgrade DACLhound`.
 
-```sh
-pipx upgrade DACLhound
-```
-
-## Collect a graph
+## Collect
 
 ```sh
 daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1
 ```
 
-`--host` accepts the domain controller's FQDN or IP address. Use the FQDN when authenticating with Kerberos.
+By default, collection tries LDAP and falls back to ADWS if LDAP is unavailable. Choose `--transport ldap` or `--transport adws` to select one explicitly. ADWS uses TCP port 9389; `--secure` applies to LDAP only. Use the domain controller FQDN for Kerberos authentication.
 
-By default, the graph is saved using the domain name in the current directory: the first collection creates `lab.local.json`, and later collections use the next available name, such as `lab.local_1.json`. Use `--output custom-name.json` only when you want to choose a custom path; existing files get the same numeric suffix. Pass `--overwrite` only when you want to replace the selected output file.
-
-The collector is read-only. By default it collects users, groups, computers, OUs, containers, GPOs, the domain, trusts, Sites from the Configuration partition, Foreign Security Principals, and ADCS data. Use `--types` to limit directory object types:
+The collector is read-only. It collects users, groups, computers, OUs, containers, GPOs, the domain, trusts, sites, Foreign Security Principals, and ADCS data. Limit directory object types with `--types`, or skip ADCS with `--no-adcs`:
 
 ```sh
-daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --types users,groups
+daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --types users,groups --no-adcs
 ```
 
-Use `--no-adcs` to skip ADCS collection. The graph uses the domain-based default filename described above. Add `--raw-output` to keep the collector's raw entries as well.
+Output is saved as `lab.local.json` in the current directory; if that name exists, a numbered filename is chosen. Set a path with `--output`, replace an existing file with `--overwrite`, or retain raw collector entries with `--raw-output`.
 
-By default, `collect` tries LDAP, then falls back to native ADWS if LDAP cannot connect. Choose a transport explicitly with `--transport ldap` or `--transport adws`. ADWS uses TCP port 9389 and supports NTLM and Kerberos; `--secure` applies to LDAP only. DACLhound resolves schema GUIDs so attribute-level `Write-Property` rights remain visible.
+### Optional host checks
 
-LDAP visibility depends on the account used for collection. If you have multiple accounts with different directory permissions, collect the domain with each one; their results may reveal additional objects or ACLs. Load the resulting JSON files together in the graph viewer, or pass them together to `analyze` to combine their data.
+Add `--host-checks` to check SMB signing policy and whether the WebClient service's `DAV RPC Service` pipe is available over SMB on collected computers. The checks require authentication to each computer; they do not perform HTTP/WebDAV requests. Use `--host-check-timeout` to set the per-host timeout and `--dns-server` to select a DNS resolver.
 
-## Analyze saved graphs
+```sh
+daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --host-checks --host-check-timeout 5
+```
 
-Run a quick console triage of saved graphs without opening the web viewer. `analyze` reports domain context, Domain Admins, effective permission paths, Kerberos roasting, delegations, ADCS findings, trusts, and other useful relationships. You can analyze several domains together; duplicate objects and relationships are combined:
+## Analyze
+
+Get a prioritized terminal overview of permissions, membership, Kerberos exposure, delegation, ADCS, trusts, and GPO links:
 
 ```sh
 daclhound analyze lab.local.json
-daclhound analyze lab.local.json megacorp.local.json
-daclhound analyze lab.local.json --from-user 'alice@lab.local'
+daclhound analyze lab.local.json other-domain.json --from-user 'alice@lab.local'
 ```
 
-By default, `analyze` traces effective permission paths from collected users, resolves trustees by SID across all supplied JSON files, and groups paths that share a trustee group. It also reports direct rights, domain membership, delegation, roasting, ADCS, and GPO link findings in prioritized sections. Use `--from-user` to focus the paths on one account. Output is colorized by default; use `--color never` to disable colors. This is a quick way to review findings from the terminal when you do not need the web viewer.
+Multiple input files are combined, with duplicate objects and relationships merged. Use `--color never` to disable colored output.
+
+## Open the graph
+
+Run the viewer in the foreground and stop it with `Ctrl+C`:
+
+```sh
+daclhound graph --input lab.local.json
+```
+
+Or manage the viewer as a background service:
+
+- Start the viewer without preloading a graph: `daclhound graph start`.
+- Start the viewer and load a graph immediately: `daclhound graph start --input lab.local.json`.
+- Check whether the background viewer is running: `daclhound graph status`.
+- Stop the background viewer: `daclhound graph stop`.
+
+The server listens on `127.0.0.1:8765` by default. Uploaded JSON files stay in memory while the server is running and are discarded when it stops. Use `--bind` and `--port` to change the listener. Run `daclhound collect --help` or `daclhound graph --help` for all options.
 
 ## Authentication
 
@@ -113,23 +117,6 @@ daclhound collect --host DC01.lab.local -d lab.local -k user.ccache -no-pass --d
 ```
 
 An AES key enables Kerberos automatically: use `-aesKey '<AESKEY>'` (with `-u`). Add `-s` to use LDAPS.
-
-## Open the graph
-
-Run the viewer in the foreground and stop it with `Ctrl+C`:
-
-```sh
-daclhound graph --input lab.local.json
-```
-
-Or manage the viewer as a background service:
-
-- Start the viewer without preloading a graph: `daclhound graph start`.
-- Start the viewer and load a graph immediately: `daclhound graph start --input lab.local.json`.
-- Check whether the background viewer is running: `daclhound graph status`.
-- Stop the background viewer: `daclhound graph stop`.
-
-The server listens on `127.0.0.1:8765` by default. Uploaded JSON files stay in memory while the server is running and are discarded when it stops. Use `--bind` and `--port` to change the listener. Run `daclhound collect --help` or `daclhound graph --help` for all options.
 
 ## License
 

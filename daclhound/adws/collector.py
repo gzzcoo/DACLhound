@@ -13,6 +13,13 @@ from ._protocol import ADWSConnect, NAMESPACES, NTLMAuth
 from ._protocol.adws import KerberosAuth
 
 
+def _status(marker: str, message: str, color: str) -> str:
+    """Color ADWS progress markers when stderr is an interactive terminal."""
+    if not sys.stderr.isatty():
+        return f"[{marker}] {message}"
+    return f"\x1b[{color}m[{marker}]\x1b[0m {message}"
+
+
 def _values(item: ET.Element, name: str) -> list[str | bytes]:
     xpath = f".//addata:{name}/ad:value"
     found = item.findall(xpath, NAMESPACES)
@@ -194,7 +201,7 @@ class ADWSCollector:
                 _, ldap_filter = type_map[kind]
                 base = (f"CN=Sites,{self.rootdse['configurationNamingContext']}"
                         if kind == "sites" else base_dn)
-                print(f"[*] Collecting {kind} through ADWS from {self.host}", file=sys.stderr)
+                print(_status("*", f"Collecting {kind} through ADWS from {self.host}", "1;34"), file=sys.stderr)
                 try:
                     for item in self._search(client, base, ldap_filter, attributes):
                         entries.append(_entry(item, attributes, self.guid_names))

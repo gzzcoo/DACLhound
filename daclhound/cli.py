@@ -15,8 +15,10 @@ from . import __version__
 from .analysis import analyze_graph_files
 from .collector import (
     build_dataset,
+    collect_host_service_checks,
     collect_with_bloodyad,
     ensure_bloodyad_available,
+    _status,
 )
 from .common import classify, scalar, stable_id
 from .graph_control import (
@@ -27,6 +29,39 @@ from .graph_control import (
     _stop_graph_server,
 )
 from .server import run_server
+
+
+def _paint(text: str, *codes: str, stream: Any = sys.stdout) -> str:
+    """Apply ANSI styling only when output is connected to a terminal."""
+    if not getattr(stream, "isatty", lambda: False)():
+        return text
+    return f"\x1b[{';'.join(codes)}m{text}\x1b[0m"
+
+
+def _print_collection_summary(dataset: dict[str, Any], output: Path) -> None:
+    nodes = dataset.get("nodes", [])
+    type_labels = (
+        ("user", "users"), ("group", "groups"), ("computer", "computers"),
+        ("ou", "OUs"), ("container", "containers"), ("gpo", "GPOs"),
+        ("domain", "domains"), ("trusted_domain", "trusts"), ("site", "sites"),
+        ("foreign_security_principal", "foreign security principals"),
+        ("cert_template", "certificate templates"), ("enterprise_ca", "enterprise CAs"),
+        ("root_ca", "root CAs"), ("adcs_policy", "issuance policies"),
+    )
+    counts = {kind: sum(node.get("type") == kind for node in nodes) for kind, _ in type_labels}
+    present = [f"{counts[kind]:,} {label}" for kind, label in type_labels if counts[kind]]
+    stats = dataset.get("stats", {})
+    print()
+    print(_paint("DACLhound", "1", "38;2;220;88;82") + " " + _paint("Enumeration completed", "1"))
+    print(f"{_paint('[+]', '1', '32')} Objects: {stats.get('objects', 0):,}" +
+          (f" ({' | '.join(present)})" if present else ""))
+    print(f"{_paint('[+]', '1', '32')} Relationships: {stats.get('aces', 0):,} ACEs | "
+          f"{stats.get('trustees', 0):,} trustees | "
+          f"{stats.get('adcsFindings', 0):,} ADCS findings")
+    quota = stats.get("machineAccountQuota")
+    quota_display = quota if quota not in (None, "") else "not collected"
+    print(f"{_paint('[+]', '1', '32')} MachineAccountQuota: {quota_display}")
+    print(f"{_paint('[+]', '1', '32')} Graph: {output}")
 
 
 def _output_candidate(path: Path, index: int) -> Path:
@@ -116,6 +151,10 @@ def main() -> int:
     collection.add_argument("--types", default="users,groups,computers,ous,containers,gpos,domain,trusts,sites,foreign-security-principals",
                             help="Comma-separated object types: users, groups, computers, OUs, containers, GPOs, domain, trusts, sites, foreign-security-principals")
     collection.add_argument("--no-adcs", action="store_true", help="Skip native ADCS ESC collection (enabled by default)")
+    collection.add_argument("--host-checks", action="store_true",
+                            help="Probe collected computers over SMB for signing policy and the WebClient DAV pipe")
+    collection.add_argument("--host-check-timeout", type=int, default=3, metavar="SECONDS",
+                            help="Per-computer SMB probe timeout when --host-checks is enabled (default: 3)")
 
     output = ap.add_argument_group("output")
     output.add_argument("-o", "--output", help="Custom path for normalized graph JSON (default: DOMAIN.json)")
@@ -127,6 +166,7 @@ def main() -> int:
 
     connection = ap.add_argument_group("connection")
     connection.add_argument("-i", "--dc-ip", help="Domain controller IP when -H is a hostname")
+    connection.add_argument("--dns-server", help="DNS server for --host-checks (defaults to --dc-ip)")
     connection.add_argument("-s", "--secure", action="store_true", help="Use LDAPS (LDAP transport only)")
     connection.add_argument("-t", "--timeout", type=int, default=180, help="Connection timeout in seconds")
     graph = commands.add_parser(
@@ -158,6 +198,8 @@ def main() -> int:
     analyze.add_argument("--color", choices=("never",), default="always",
                          help="Disable ANSI colors (colors are enabled by default)")
     ns = parser.parse_args()
+    if ns.command == "collect" and ns.host_check_timeout < 1:
+        ap.error("--host-check-timeout must be at least 1 second")
 
     if ns.command == "analyze":
         if ns.limit < 0:
@@ -258,10 +300,10 @@ def main() -> int:
             ap.error("--no-adcs cannot be combined with 'adcs' in -t/--types")
     include_adcs = not ns.no_adcs
     selected = {type_map[t][0] for t in requested_objects}
-    attrs = ("distinguishedName,sAMAccountName,objectClass,objectSid,sIDHistory,nTSecurityDescriptor,memberOf,member,altSecurityIdentities,description,whenCreated,pwdLastSet,lastLogon,lastLogonTimestamp,"
+    attrs = ("distinguishedName,sAMAccountName,objectClass,objectSid,sIDHistory,nTSecurityDescriptor,memberOf,member,altSecurityIdentities,description,homeDirectory,whenCreated,pwdLastSet,lastLogon,lastLogonTimestamp,ms-DS-MachineAccountQuota,"
              "primaryGroupID,cn,name,displayName,gPLink,gPOptions,gPCFileSysPath,gPCWQLFilter,versionNumber,"
              "userAccountControl,msDS-AllowedToDelegateTo,msDS-AllowedToActOnBehalfOfOtherIdentity,msDS-GroupMSAMembership,"
-             "servicePrincipalName,dNSHostName,adminCount,trustPartner,trustDirection,trustType,trustAttributes,securityIdentifier")
+             "servicePrincipalName,dNSHostName,adminCount,trustPartner,trustDirection,trustType,trustAttributes,securityIdentifier,scriptPath,operatingSystem,operatingSystemVersion")
     raw_entries: list[dict[str, Any]] = []
     used_adws = False
     if ns.from_raw:
@@ -310,7 +352,7 @@ def main() -> int:
 
         if ns.transport == "adws":
             auth_mode = "Kerberos" if kerberos_enabled or ns.aes_key else "NTLM"
-            print(f"[*] Authentication: {auth_mode}; transport: ADWS", file=sys.stderr)
+            print(_status("*", f"Authentication: {auth_mode}; transport: ADWS", "1;34"), file=sys.stderr)
             try:
                 raw_entries = collect_adws()
                 used_adws = True
@@ -349,6 +391,14 @@ def main() -> int:
     for e in raw_entries:
         unique[stable_id(e) or json.dumps(e, sort_keys=True)] = e
     raw_entries = list(unique.values())
+    if ns.host_checks:
+        collect_host_service_checks(
+            raw_entries, username=ns.username or "", domain=ns.domain,
+            password=ns.password or "", hashes=ns.nt_hash or "", aes_key=ns.aes_key or "",
+            kerberos=kerberos_enabled or bool(ns.aes_key), ccache=kerberos_ticket,
+            kdc_host=ns.dc_ip or ns.host, dns_server=ns.dns_server or ns.dc_ip,
+            timeout=ns.host_check_timeout,
+        )
     target_domain = _target_domain(raw_entries, ns.domain)
     dataset = build_dataset(raw_entries, target_domain, selected)
     out, raw_path = _resolve_output_paths(target_domain, ns.output, ns.raw_output, ns.overwrite)
@@ -357,10 +407,9 @@ def main() -> int:
     if raw_path is not None:
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         raw_path.write_text(json.dumps(raw_entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"[+] Objects: {dataset['stats']['objects']} | ACEs: {dataset['stats']['aces']} | Trustees: {dataset['stats']['trustees']} | ADCS findings: {dataset['stats']['adcsFindings']}")
-    print(f"[+] Graph: {out}")
+    _print_collection_summary(dataset, out)
     if used_adws:
-        print("[*] Need to exploit over ADWS, for example when LDAP is unavailable? SOAPy supports targeted operations such as RBCD, Shadow Credentials, and SPN/UAC writes: https://github.com/logangoins/SOAPy")
+        print(_status("*", "Need to exploit over ADWS, for example when LDAP is unavailable? SOAPy supports targeted operations such as RBCD, Shadow Credentials, and SPN/UAC writes: https://github.com/logangoins/SOAPy", "1;34"))
     if raw_path:
         print(f"[+] Raw collector response: {raw_path}")
     return 0

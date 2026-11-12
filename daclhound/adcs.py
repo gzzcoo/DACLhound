@@ -145,15 +145,16 @@ def adcs_is_cert_publishers_principal(value: str) -> bool:
 
 
 def adcs_default_admin_principal(value: str) -> bool:
-    """Exclude built-in domain admin groups from actionable ESC13 graph edges."""
+    """Exclude well-known privileged accounts and groups from ADCS findings."""
     principals = [part.strip().casefold().split("\\")[-1]
                   for part in re.split(r"[;|]", value) if part.strip()]
     return bool(principals) and all(
         principal in {
             "domain admins", "enterprise admins", "schema admins",
             "administrators", "builtin_administrators", "builtin administrators",
+            "administrator", "guest", "krbtgt",
         }
-        or re.fullmatch(r"s-1-5-21-(?:\d+-){3}(?:512|518|519)", principal)
+        or re.fullmatch(r"s-1-5-21-(?:\d+-){3}(?:500|501|502|512|518|519)", principal)
         or principal == "s-1-5-32-544"
         for principal in principals
     )
@@ -200,7 +201,8 @@ def adcs_assessment(entries: list[dict[str, Any]], edges: list[dict[str, Any]]) 
                 continue
             rights = {part.strip().upper() for part in scalar(ace.get("Right")).split("|")}
             trustee = scalar(ace.get("Trustee"))
-            if adcs_common_principal(trustee) and not adcs_cert_publishers_user_members(trustee, edges):
+            if (adcs_common_principal(trustee) or adcs_default_admin_principal(trustee)) \
+                    and not adcs_cert_publishers_user_members(trustee, edges):
                 continue
             result.append((trustee, scalar(ace.get("ObjectType")), rights,
                            scalar(ace.get("Type"))))
@@ -232,21 +234,7 @@ def adcs_assessment(entries: list[dict[str, Any]], edges: list[dict[str, Any]]) 
         and bool((int_attr(t, "msPKI-Certificate-Name-Flag") or 0) & 0x1)
         for t in templates
     )
-    server_auth_template = False
-    for template in templates:
-        ekus = adcs_eku(template)
-        server_auth = "1.3.6.1.5.5.7.3.1" in ekus or ANY_PURPOSE_EKU in ekus or not ekus
-        if not ((int_attr(template, "msPKI-Certificate-Name-Flag") or 0) & 0x1) or not server_auth:
-            continue
-        cn = scalar(attr(template, "cn")).casefold()
-        for ca in cas:
-            published = attr(ca, "certificateTemplates", []) or []
-            names = {scalar(value).casefold() for value in (published if isinstance(published, list) else [published])}
-            if cn in names and adcs_enrollers(template) & adcs_enrollers(ca):
-                server_auth_template = True
-                break
-        if server_auth_template:
-            break
+    server_auth_template = "ESC17" in candidates
     observations = {
         "ESC1": ("LDAP template, enrollment, CA publication and NTAuth signals are inspected.", "CA chain trust and effective enrollment policy still need validation."),
         "ESC2": ("Any Purpose/no-EKU templates and LDAP enrollment signals are inspected.", "The target template and effective Enrollment Agent restrictions must also be validated."),
@@ -606,11 +594,12 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
             if not (rights.intersection({"GENERIC_ALL", "GENERIC_WRITE", "WRITE_DACL", "WRITE_OWNER"}) or scoped_write):
                 continue
             for trustee in trustees(ace.get("Trustee")):
-                if adcs_common_principal(trustee):
+                if adcs_common_principal(trustee) or adcs_default_admin_principal(trustee):
                     continue
                 source = principal_node(trustee)
+                scope = scalar(ace.get("ObjectType")).strip() or "all template properties"
                 add_finding(source, "ESC4", template, None, source, nodes_by_id[source]["name"], False,
-                            ["Trustee has write/control rights on the certificate template DACL.",
+                            [f"{trustee} has {scalar(ace.get('Right'))} on template scope {scope}.",
                              "Template changes and downstream enrollment conditions require validation."])
 
         # ESC2 templates are valuable findings but do not by themselves create
@@ -712,6 +701,11 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
         if adcs_default_admin_principal(principal):
             return
         if adcs_common_principal(principal):
+            if esc == "ESC17":
+                source = principal_node(principal)
+                add_finding(source, esc, item, ca, source, nodes_by_id[source]["name"],
+                            False, evidence, is_acl)
+                return
             if not adcs_is_cert_publishers_principal(principal):
                 return
             members = adcs_cert_publishers_user_members(principal, edges, nodes_by_id)
@@ -819,7 +813,7 @@ def add_adcs_findings(entries: list[dict[str, Any]], nodes: list[dict[str, Any]]
                                     "The CA patch level for CVE-2024-49019 is not available through this LDAP collection."], ca)
         server_auth = "1.3.6.1.5.5.7.3.1" in ekus or ANY_PURPOSE_EKU in ekus or not ekus
         if name_flags & 0x1 and server_auth and not (enrollment_flags & 0x2) and (int_attr(template, "msPKI-RA-Signature") or 0) == 0:
-            for ca, principals in published:
+            for ca, principals in published_enrollers(template, include_common=True):
                 for trustee in sorted(principals):
                     emit_indicator("ESC17", template, trustee,
                                    ["Template is published by this CA, permits enrollee-supplied subject and includes Server Authentication EKU.",
