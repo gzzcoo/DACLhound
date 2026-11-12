@@ -6,7 +6,7 @@ Unlike BloodHound CE's modeled graph edges, DACLhound preserves the collected DA
 
 ![DACLhound graph example](https://raw.githubusercontent.com/gzzcoo/DACLhound/main/DACLhound/DACLhound.png)
 
-[Watch the demo](https://github.com/gzzcoo/DACLhound/releases/download/v0.1.30/daclhound.mp4)
+https://github.com/user-attachments/assets/d691098f-426c-4c34-ae8d-40e148de3154
 
 ## Install
 
