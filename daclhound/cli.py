@@ -38,6 +38,13 @@ def _paint(text: str, *codes: str, stream: Any = sys.stdout) -> str:
     return f"\x1b[{';'.join(codes)}m{text}\x1b[0m"
 
 
+def _print_banner() -> None:
+    """Print the CLI identity and leave a blank line before command output."""
+    print(_paint("DACLhound", "1", "38;2;220;88;82") +
+          f" v{__version__} - by Jeremy Rodriguez (gzzcoo)", flush=True)
+    print(flush=True)
+
+
 def _print_collection_summary(dataset: dict[str, Any], output: Path) -> None:
     nodes = dataset.get("nodes", [])
     type_labels = (
@@ -52,7 +59,8 @@ def _print_collection_summary(dataset: dict[str, Any], output: Path) -> None:
     present = [f"{counts[kind]:,} {label}" for kind, label in type_labels if counts[kind]]
     stats = dataset.get("stats", {})
     print()
-    print(_paint("DACLhound", "1", "38;2;220;88;82") + " " + _paint("Enumeration completed", "1"))
+    print(_paint("DACLhound", "1", "38;2;220;88;82") + " " + _paint("Enumeration completed!", "1"))
+    print()
     print(f"{_paint('[+]', '1', '32')} Objects: {stats.get('objects', 0):,}" +
           (f" ({' | '.join(present)})" if present else ""))
     print(f"{_paint('[+]', '1', '32')} Relationships: {stats.get('aces', 0):,} ACEs | "
@@ -120,14 +128,19 @@ def _resolve_output_paths(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Collect, analyze, or graph Active Directory DACL data.")
+    if "--_daemon-child" not in sys.argv:
+        _print_banner()
+    parser = argparse.ArgumentParser(
+        prog="daclhound",
+        description="Collect, analyze, or graph Active Directory DACL data.",
+    )
     parser.add_argument("--version", action="version", version=f"DACLhound {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     ap = commands.add_parser(
         "collect", description="Read-only Active Directory DACL collector using LDAP or native ADWS.",
         help="Collect DACLs and write a normalized graph JSON",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Example:\n  DACLhound.py collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1",
+        epilog="Example:\n  daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1",
     )
     auth = ap.add_argument_group("authentication")
     auth.add_argument("-H", "--host", required=True, help="Domain controller hostname or IP")
@@ -152,9 +165,9 @@ def main() -> int:
                             help="Comma-separated object types: users, groups, computers, OUs, containers, GPOs, domain, trusts, sites, foreign-security-principals")
     collection.add_argument("--no-adcs", action="store_true", help="Skip native ADCS ESC collection (enabled by default)")
     collection.add_argument("--host-checks", action="store_true",
-                            help="Probe collected computers over SMB for signing policy and the WebClient DAV pipe")
-    collection.add_argument("--host-check-timeout", type=int, default=3, metavar="SECONDS",
-                            help="Per-computer SMB probe timeout when --host-checks is enabled (default: 3)")
+                            help="Check SMB signing and WebClient status on collected computers")
+    collection.add_argument("--host-check-timeout", type=int, default=5, metavar="SECONDS",
+                            help="Per-computer SMB probe timeout when --host-checks is enabled (default: 5)")
 
     output = ap.add_argument_group("output")
     output.add_argument("-o", "--output", help="Custom path for normalized graph JSON (default: DOMAIN.json)")
@@ -174,10 +187,10 @@ def main() -> int:
         description="Run the graph viewer in this terminal or manage it as a background service.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=("Examples:\n"
-                "  DACLhound.py graph start --input <domain>.json\n"
-                "  DACLhound.py graph stop\n"
-                "  DACLhound.py graph --input <domain>.json  # foreground; stop with Ctrl+C\n"
-                "  DACLhound.py graph --verbose             # print HTTP request logs"),
+                "  daclhound graph start --input <domain>.json\n"
+                "  daclhound graph stop\n"
+                "  daclhound graph --input <domain>.json  # foreground; stop with Ctrl+C\n"
+                "  daclhound graph --verbose             # print HTTP request logs"),
     )
     graph.add_argument("action", nargs="?", choices=("run", "start", "stop", "status"), default="run",
                        help="run in this terminal, start in the background, or stop/status a background server")
