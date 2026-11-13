@@ -223,7 +223,8 @@ class ADWSConnect:
 
     def _query_enumeration(
         self, remoteName: str, nmf: NMFConnection, query: str, attributes: list,
-        base_object_dn_for_soap: str | None = None, use_schema=False, schema_dn: str | None = None
+        base_object_dn_for_soap: str | None = None, use_schema=False, schema_dn: str | None = None,
+        scope: str = "Subtree",
     ) -> str | None:
         fAttributes: str = "".join([f"<ad:SelectionProperty>addata:{attr}</ad:SelectionProperty>\n" for attr in attributes])
 
@@ -238,7 +239,7 @@ class ADWSConnect:
 
         query_vars = {
             "uuid": str(uuid4()), "fqdn": remoteName, "query": query,
-            "attributes": fAttributes, "baseobj": effective_base_obj,
+            "attributes": fAttributes, "baseobj": effective_base_obj, "scope": scope,
         }
         enumeration_request_soap = LDAP_QUERY_FSTRING.format(**query_vars)
 
@@ -371,19 +372,20 @@ class ADWSConnect:
     def pull(
         self, query: str, attributes: list,
         print_incrementally: bool = False,
-        base_object_dn_for_soap: str | None = None, use_schema=False
+        base_object_dn_for_soap: str | None = None, use_schema=False, scope: str = "Subtree"
     ) -> ElementTree.Element | None:
         if self._resource != "Enumeration":
             raise NotImplementedError("Pull is only supported on 'pull' (Enumeration) clients")
         if use_schema:
             enum_ctx = self._query_enumeration(
                 remoteName=self._fqdn, nmf=self._nmf, query=query,
-                attributes=attributes, base_object_dn_for_soap=base_object_dn_for_soap, use_schema=True
+                attributes=attributes, base_object_dn_for_soap=base_object_dn_for_soap, use_schema=True,
+                scope=scope
             )
         else:
             enum_ctx = self._query_enumeration(
                 remoteName=self._fqdn, nmf=self._nmf, query=query,
-                attributes=attributes, base_object_dn_for_soap=base_object_dn_for_soap
+                attributes=attributes, base_object_dn_for_soap=base_object_dn_for_soap, scope=scope
             )
         if enum_ctx is None:
             return None

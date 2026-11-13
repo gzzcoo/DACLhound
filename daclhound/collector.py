@@ -225,6 +225,7 @@ async def collect_with_bloodyad(
     from bloodyAD.cli_modules.get import search as bloodyad_search
     from bloodyAD.exceptions import NoResultError
     from bloodyAD.network.config import Config, ConnectionHandler
+    from bloodyAD.network.ldap import Scope
 
     memory_ccache_hex = None
     if kerberos and password and not kerberos_ticket and not auth_format:
@@ -310,6 +311,45 @@ async def collect_with_bloodyad(
             except Exception as exc:
                 print(f"[!] ADCS collection warning: {exc}; continuing with collected DACL data",
                       file=sys.stderr)
+        # tokenGroups is computed by AD and only works in BASE scope. Query it
+        # per non-default user instead of including it in the broad subtree
+        # searches above (which fail with ERROR_DS_NON_BASE_SEARCH).
+        ldap = await conn.getLdap()
+        token_group_failures = 0
+        for entry in entries:
+            if classify(entry) != "user":
+                continue
+            sid = canonical_sid(attr(entry, "objectSid"))
+            account_name = scalar(attr(entry, "sAMAccountName")).strip().casefold()
+            if account_name == "administrator" or sid.endswith("-500"):
+                continue
+            dn = scalar(attr(entry, "distinguishedName")).strip()
+            if not dn:
+                continue
+            token_sids: list[str] = []
+            base_query_succeeded = False
+            for token_attribute in ("tokenGroups", "tokenGroupsNoGCAcceptable"):
+                try:
+                    async for token_entry in ldap.bloodysearch(
+                        dn, "(objectClass=*)", search_scope=Scope.BASE,
+                        attr=[token_attribute], control_flag=0,
+                    ):
+                        base_query_succeeded = True
+                        values = attr(token_entry, token_attribute, []) or []
+                        if not isinstance(values, list):
+                            values = [values]
+                        token_sids = [sid_value for value in values
+                                      if (sid_value := canonical_sid(value))]
+                    if token_sids:
+                        break
+                except Exception:
+                    continue
+            if not base_query_succeeded:
+                token_group_failures += 1
+            entry["daclgraphTokenGroupSids"] = token_sids
+        if token_group_failures:
+            print(f"[!] Could not read effective group memberships for {token_group_failures} user(s); continuing",
+                  file=sys.stderr)
     finally:
         await conn.closeLdap()
     return entries
@@ -509,7 +549,13 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
         members = entry.get("member", [])
         if kind == "group" and (sam or name).casefold() == "domain users":
             members = []
-        token_groups = attr(entry, "tokenGroups", []) or []
+        token_groups = attr(entry, "daclgraphTokenGroupSids", []) or []
+        if not isinstance(token_groups, list):
+            token_groups = [token_groups]
+        direct_token_groups = attr(entry, "tokenGroups", []) or []
+        if not isinstance(direct_token_groups, list):
+            direct_token_groups = [direct_token_groups]
+        token_groups = [*token_groups, *direct_token_groups]
         token_groups_fallback = attr(entry, "tokenGroupsNoGCAcceptable", []) or []
         if not isinstance(token_groups, list):
             token_groups = [token_groups]

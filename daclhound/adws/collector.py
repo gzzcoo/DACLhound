@@ -135,9 +135,9 @@ class ADWSCollector:
                 pass
 
     def _search(self, client: ADWSConnect, base: str, ldap_filter: str,
-                attributes: list[str]) -> list[ET.Element]:
+                attributes: list[str], scope: str = "Subtree") -> list[ET.Element]:
         result = client.pull(query=ldap_filter, attributes=attributes,
-                             base_object_dn_for_soap=base)
+                             base_object_dn_for_soap=base, scope=scope)
         if result is None:
             raise RuntimeError(f"ADWS returned no enumeration result for {base} with filter {ldap_filter}; check the ADWS fault above")
         return list(result)
@@ -213,6 +213,36 @@ class ADWSCollector:
                         print(f"[i] No {kind.replace('-', ' ')} found; continuing", file=sys.stderr)
                         continue
                     raise
+            token_group_failures = 0
+            for entry in entries:
+                classes = {str(value).casefold() for value in (entry.get("objectClass") or [])}
+                if "user" not in classes or "computer" in classes:
+                    continue
+                sid = str(entry.get("objectSid") or "")
+                sam = str(entry.get("sAMAccountName") or "").casefold()
+                if sam == "administrator" or sid.endswith("-500"):
+                    continue
+                dn = str(entry.get("distinguishedName") or "")
+                token_sids: list[str] = []
+                base_query_succeeded = False
+                for token_attribute in ("tokenGroups", "tokenGroupsNoGCAcceptable"):
+                    try:
+                        for item in self._search(client, dn, "(objectClass=*)",
+                                                 [token_attribute], scope="Base"):
+                            base_query_succeeded = True
+                            token_entry = _entry(item, [token_attribute], self.guid_names)
+                            values = token_entry.get(token_attribute, []) or []
+                            token_sids.extend(values if isinstance(values, list) else [values])
+                        if token_sids:
+                            break
+                    except Exception:
+                        continue
+                if not base_query_succeeded:
+                    token_group_failures += 1
+                entry["daclgraphTokenGroupSids"] = token_sids
+            if token_group_failures:
+                print(f"[!] Could not read effective group memberships for {token_group_failures} user(s); continuing",
+                      file=sys.stderr)
             if include_adcs:
                 self._collect_adcs(client, entries)
         finally:

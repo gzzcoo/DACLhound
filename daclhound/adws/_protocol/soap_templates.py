@@ -59,7 +59,7 @@ LDAP_QUERY_FSTRING: str = """<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap
                 <adlq:LdapQuery>
                     <adlq:Filter>{query}</adlq:Filter>
                     <adlq:BaseObject>{baseobj}</adlq:BaseObject>
-                    <adlq:Scope>Subtree</adlq:Scope>
+                    <adlq:Scope>{scope}</adlq:Scope>
                 </adlq:LdapQuery>
             </wsen:Filter>
             <ad:Selection Dialect="http://schemas.microsoft.com/2008/1/ActiveDirectory/Dialect/XPath-Level-1">

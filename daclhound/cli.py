@@ -314,7 +314,7 @@ def main() -> int:
     include_adcs = not ns.no_adcs
     selected = {type_map[t][0] for t in requested_objects}
     attrs = ("distinguishedName,sAMAccountName,objectClass,objectSid,sIDHistory,nTSecurityDescriptor,memberOf,member,altSecurityIdentities,description,homeDirectory,whenCreated,pwdLastSet,lastLogon,lastLogonTimestamp,ms-DS-MachineAccountQuota,"
-             "primaryGroupID,tokenGroups,tokenGroupsNoGCAcceptable,cn,name,displayName,gPLink,gPOptions,gPCFileSysPath,gPCWQLFilter,versionNumber,"
+             "primaryGroupID,cn,name,displayName,gPLink,gPOptions,gPCFileSysPath,gPCWQLFilter,versionNumber,"
              "userAccountControl,msDS-AllowedToDelegateTo,msDS-AllowedToActOnBehalfOfOtherIdentity,msDS-GroupMSAMembership,"
              "servicePrincipalName,dNSHostName,adminCount,trustPartner,trustDirection,trustType,trustAttributes,securityIdentifier,scriptPath,operatingSystem,operatingSystemVersion")
     raw_entries: list[dict[str, Any]] = []
