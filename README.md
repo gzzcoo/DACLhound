@@ -39,7 +39,7 @@ Output is saved as `lab.local.json` in the current directory; if that name exist
 Add `--host-checks` to check SMB signing policy and whether the WebClient service's `DAV RPC Service` pipe is available over SMB on collected computers. The checks require authentication to each computer; they do not perform HTTP/WebDAV requests. Use `--host-check-timeout` to set the per-host timeout and `--dns-server` to select a DNS resolver.
 
 ```sh
-daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --host-checks --host-check-timeout 5
+daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --host-checks --host-check-timeout 5 --dns-server 192.168.2.1
 ```
 
 ## Analyze
