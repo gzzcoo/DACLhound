@@ -191,7 +191,15 @@ def _status(marker: str, message: str, color: str) -> str:
 def json_value(value: Any) -> Any:
     """Match bloodyAD's JSON conversion for values returned by its search renderer."""
     if isinstance(value, dict):
-        return {key: json_value(member) for key, member in value.items()}
+        result = {}
+        for key, member in value.items():
+            if key.casefold() in {"tokengroups", "tokengroupsnogcaacceptable"}:
+                values = member if isinstance(member, (list, tuple, set)) else [member]
+                result[key] = [base64.b64encode(value).decode("ascii") if isinstance(value, bytes)
+                               else json_value(value) for value in values]
+            else:
+                result[key] = json_value(member)
+        return result
     if isinstance(value, (list, tuple, set)):
         return [json_value(member) for member in value]
     return str(value)
@@ -501,6 +509,13 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
         members = entry.get("member", [])
         if kind == "group" and (sam or name).casefold() == "domain users":
             members = []
+        token_groups = attr(entry, "tokenGroups", []) or []
+        token_groups_fallback = attr(entry, "tokenGroupsNoGCAcceptable", []) or []
+        if not isinstance(token_groups, list):
+            token_groups = [token_groups]
+        if not isinstance(token_groups_fallback, list):
+            token_groups_fallback = [token_groups_fallback]
+        token_groups = [*token_groups, *token_groups_fallback]
         nodes.append({"id": node_id, "name": name, "type": kind, "dn": dn,
                       "sid": scalar(entry.get("objectSid")), "owner": scalar(descriptor.get("Owner")),
                       "sidHistory": [sid for value in sid_history
@@ -509,6 +524,7 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                       "memberOf": entry.get("memberOf", []), "members": members,
                       "dNSHostName": scalar(attr(entry, "dNSHostName")),
                       "primaryGroupID": scalar(entry.get("primaryGroupID")),
+                      "tokenGroups": token_groups,
                       "samAccountName": sam, "displayName": display_name,
                       "description": scalar(attr(entry, "description")),
                       "scriptPath": scalar(attr(entry, "scriptPath")),
@@ -851,6 +867,32 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                 group_id = object_ids.get(f"{sid.rsplit('-', 1)[0]}-{node['primaryGroupID']}".casefold())
                 if group_id:
                     add_membership(node["id"], group_id)
+
+    # tokenGroups is AD's transitive security-group view. Keep only memberships
+    # that expose non-default users in high-impact administrator groups; adding
+    # every token group would flood the graph with routine memberships.
+    privileged_group_ids = {
+        group["id"] for group in nodes
+        if group.get("type") == "group"
+        and (canonical_sid(group.get("sid")) == "S-1-5-32-544"
+             or canonical_sid(group.get("sid")).endswith(("-512", "-519")))
+    }
+    for user in nodes:
+        if user.get("type") != "user":
+            continue
+        sid = canonical_sid(user.get("sid"))
+        sam = scalar(user.get("samAccountName") or user.get("name")).strip().casefold()
+        if sam == "administrator" or sid.endswith("-500"):
+            continue
+        token_groups = user.get("tokenGroups") or []
+        if not isinstance(token_groups, list):
+            token_groups = [token_groups]
+        for token_sid in token_groups:
+            group_id = canonical_sid(token_sid)
+            if group_id in privileged_group_ids:
+                add_membership(user["id"], group_id)
+    for node in nodes:
+        node.pop("tokenGroups", None)
 
     # A scope object links GPOs through its gPLink attribute. Keep this distinct
     # from DACL edges so the viewer can label and style scope relationships.

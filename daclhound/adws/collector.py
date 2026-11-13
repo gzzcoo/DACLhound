@@ -31,7 +31,8 @@ def _values(item: ET.Element, name: str) -> list[str | bytes]:
             continue
         binary = (element.attrib.get(f"{{{NAMESPACES['xsi']}}}type", "").endswith("base64Binary")
                   or name.casefold() in {"objectsid", "objectguid", "sidhistory", "ntsecuritydescriptor",
-                                        "msds-groupmsamembership", "cacertificate", "schemaidguid",
+                                        "msds-groupmsamembership", "tokengroups", "tokengroupsnogcaacceptable",
+                                        "cacertificate", "schemaidguid",
                                         "attributesecurityguid"})
         if binary:
             try:
@@ -69,6 +70,8 @@ def _entry(item: ET.Element, attributes: list[str], guid_names: dict[str, str]) 
         elif name.casefold() in {"msds-groupmsamembership", "msds-allowedtoactonbehalfofotheridentity"}:
             values = [parse_security_descriptor(x, guid_names) if isinstance(x, bytes) else {} for x in values]
         elif name.casefold() == "sidhistory":
+            values = [_sid(x) if isinstance(x, bytes) else x for x in values]
+        elif name.casefold() in {"tokengroups", "tokengroupsnogcaacceptable"}:
             values = [_sid(x) if isinstance(x, bytes) else x for x in values]
         else:
             values = [base64.b64encode(x).decode("ascii") if isinstance(x, bytes) else x for x in values]
