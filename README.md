@@ -78,6 +78,18 @@ The server listens on `127.0.0.1:8765` by default. Uploaded JSON files stay in m
 daclhound collect --host DC01.lab.local -d lab.local -u 'user' -p 'password' --dc-ip 192.168.2.1
 ```
 
+### Cross-forest collection
+
+When collecting from a trusted forest with an account from another forest, point `--host` to a domain controller in the forest you want to query. Set `-d` to the account's logon domain, and pass only the username to `-u` (do not prefix it with `DOMAIN\`; DACLhound uses `-d` to qualify the username).
+
+For example, if `analyst` belongs to `lab.local` and `lab.local` has a bidirectional trust with `megacorp.local`, the collection command can look like this:
+
+```sh
+daclhound collect --host DC01.megacorp.local -d lab.local -u 'analyst' -p 'P@ssw0rd01!' --dc-ip 192.0.2.10
+```
+
+Replace `192.0.2.10` with the IP address of `DC01.megacorp.local`. The trust must permit the account to authenticate, and the account must have sufficient directory permissions for the data you want to collect.
+
 ### NTLM pass-the-hash
 
 Pass the NT hash directly, or use `LMHASH:NTHASH` when you have both hashes:
