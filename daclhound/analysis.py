@@ -163,7 +163,7 @@ def _analysis_edge_label(edge: dict[str, Any]) -> str:
         if object_type.strip().casefold() == "rdn":
             return "WriteDN"
         properties = (
-            ("useraccountcontrol", "WriteUserAccountControl"), ("logonhours", "WriteLogonHours"),
+            ("useraccountcontrol", "WriteUAC"), ("logonhours", "WriteLogonHours"),
             ("serviceprincipalname", "WriteSPN"), ("gplink", "WriteGPLink"),
             ("mspkicertificatenameflag", "WritePKINameFlag"), ("mspkienrollmentflag", "WritePKIEnrollmentFlag"),
             ("publicinformation", "WritePublicInformation"), ("accountrestrictions", "WriteAccountRestrictions"),
