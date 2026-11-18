@@ -572,6 +572,7 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                       "primaryGroupID": scalar(entry.get("primaryGroupID")),
                       "tokenGroups": token_groups,
                       "samAccountName": sam, "displayName": display_name,
+                      "groupType": int_attr(entry, "groupType"),
                       "description": scalar(attr(entry, "description")),
                       "scriptPath": scalar(attr(entry, "scriptPath")),
                       "operatingSystem": scalar(attr(entry, "operatingSystem")),

@@ -1,3 +1,3 @@
 """DACLhound Active Directory collection and analysis package."""
 
-__version__ = "0.1.35"
+__version__ = "0.1.36"
