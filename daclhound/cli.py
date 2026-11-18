@@ -165,9 +165,9 @@ def main() -> int:
                             help="Comma-separated object types: users, groups, computers, OUs, containers, GPOs, domain, trusts, sites, foreign-security-principals")
     collection.add_argument("--no-adcs", action="store_true", help="Skip native ADCS ESC collection (enabled by default)")
     collection.add_argument("--host-checks", action="store_true",
-                            help="Check SMB signing and WebClient status on collected computers")
+                            help="Check SMB signing/WebClient on computers and LDAP relay policy on domain controllers")
     collection.add_argument("--host-check-timeout", type=int, default=5, metavar="SECONDS",
-                            help="Per-computer SMB probe timeout when --host-checks is enabled (default: 5)")
+                            help="Per-computer host-check timeout when --host-checks is enabled (default: 5)")
 
     output = ap.add_argument_group("output")
     output.add_argument("-o", "--output", help="Custom path for normalized graph JSON (default: DOMAIN.json)")

@@ -362,11 +362,12 @@ def collect_host_service_checks(
     dns_server: str | None = None,
     timeout: int = 3, workers: int = 8,
 ) -> None:
-    """Collect SMB signing policy and the WebClient DAV pipe from computer nodes.
+    """Collect host security checks for computers and LDAP policy for DCs.
 
     SMB signing is read from the unauthenticated protocol negotiation. WebClient
     is identified by opening its DAV RPC named pipe in IPC$, matching the
     protocol-level check used by common SMB collectors without invoking one.
+    LDAP policy values are read from the DC registry over Remote Registry RPC.
     """
     computers: dict[str, list[dict[str, Any]]] = {}
     for entry in entries:
@@ -380,6 +381,7 @@ def collect_host_service_checks(
         return
     try:
         from impacket import nt_errors
+        from impacket.dcerpc.v5 import rrp, transport
         from impacket.smbconnection import SMBConnection, SessionError
         from impacket.smb3structs import (
             FILE_READ_DATA, SMB2_DIALECT_30, SMB2_NEGOTIATE_SIGNING_REQUIRED,
@@ -401,10 +403,68 @@ def collect_host_service_checks(
         else:
             nthash = hashes
 
-    def check(host: str) -> tuple[str, bool | None, bool | None, str | None]:
+    def is_domain_controller(host_entries: list[dict[str, Any]]) -> bool:
+        for entry in host_entries:
+            flags = attr(entry, "userAccountControl", []) or []
+            flags = flags if isinstance(flags, list) else [flags]
+            if (scalar(attr(entry, "primaryGroupID")).strip() == "516"
+                    or any(scalar(flag).strip().upper() == "SERVER_TRUST_ACCOUNT" for flag in flags)
+                    or re.search(r"(?:^|,)OU=Domain Controllers(?:,|$)",
+                                 scalar(entry.get("distinguishedName")), re.I)):
+                return True
+        return False
+
+    def read_ldap_policy(connection: Any, host: str, remote_host: str) -> dict[str, int | None]:
+        result: dict[str, int | None] = {
+            "ldapServerIntegrity": None,
+            "ldapServerEnforceIntegrity": None,
+            "ldapEnforceChannelBinding": None,
+        }
+        dce = None
+        root = key = None
+        try:
+            rpc = transport.SMBTransport(remoteName=host, remoteHost=remote_host,
+                                         filename=r"\winreg", smb_connection=connection)
+            dce = rpc.get_dce_rpc()
+            dce.connect()
+            dce.bind(rrp.MSRPC_UUID_RRP)
+            root = rrp.hOpenLocalMachine(dce, samDesired=rrp.KEY_READ)["phKey"]
+            key = rrp.hBaseRegOpenKey(
+                dce, root, r"SYSTEM\CurrentControlSet\Services\NTDS\Parameters",
+                samDesired=rrp.KEY_READ,
+            )["phkResult"]
+            for name, field in (
+                ("LDAPServerIntegrity", "ldapServerIntegrity"),
+                ("LDAPServerEnforceIntegrity", "ldapServerEnforceIntegrity"),
+                ("LdapEnforceChannelBinding", "ldapEnforceChannelBinding"),
+            ):
+                try:
+                    value_type, value = rrp.hBaseRegQueryValue(dce, key, name)
+                    if value_type == rrp.REG_DWORD:
+                        result[field] = int(value)
+                except Exception:
+                    # Missing/blocked values remain unknown; do not infer policy defaults.
+                    continue
+        finally:
+            if dce is not None:
+                for handle in (key, root):
+                    if handle is not None:
+                        try:
+                            rrp.hBaseRegCloseKey(dce, handle)
+                        except Exception:
+                            pass
+                try:
+                    dce.disconnect()
+                except Exception:
+                    pass
+        return result
+
+    def check(host: str) -> tuple[str, bool | None, bool | None, dict[str, int | None] | None, str | None]:
         connection = None
         signing: bool | None = None
         webclient: bool | None = None
+        ldap_policy: dict[str, int | None] | None = None
+        authenticated = False
         problem = None
         try:
             remote_host = host
@@ -443,6 +503,7 @@ def collect_host_service_checks(
                                              aes_key, kdc_host or None)
                 else:
                     connection.login(username, password, domain, lmhash, nthash)
+                authenticated = True
                 tree_id = connection.connectTree("IPC$")
                 file_id = connection.openFile(tree_id, "DAV RPC Service", desiredAccess=FILE_READ_DATA)
                 connection.closeFile(tree_id, file_id)
@@ -454,6 +515,13 @@ def collect_host_service_checks(
                     problem = f"WebClient pipe check returned SMB status {exc.getErrorCode():#x}"
             except Exception as exc:
                 problem = f"WebClient pipe check failed ({type(exc).__name__}: {exc})"
+            if authenticated and is_domain_controller(computers[host.casefold()]):
+                try:
+                    ldap_policy = read_ldap_policy(connection, host, remote_host)
+                except Exception as exc:
+                    problem = (problem + "; " if problem else "") + (
+                        f"LDAP policy check failed ({type(exc).__name__}: {exc})"
+                    )
         except Exception as exc:
             problem = f"SMB probe failed ({type(exc).__name__}: {exc})"
         finally:
@@ -462,17 +530,28 @@ def collect_host_service_checks(
                     connection.logoff()
                 except Exception:
                     pass
-        return host, signing, webclient, problem
+        return host, signing, webclient, ldap_policy, problem
 
-    print(_status("*", f"Checking SMB signing and WebClient on {len(computers)} computers", "1;34"), file=sys.stderr)
+    print(_status("*", f"Checking SMB signing and WebClient on {len(computers)} computers; LDAP policy on domain controllers", "1;34"), file=sys.stderr)
     try:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             futures = {pool.submit(check, host): host for host in computers}
             for future in as_completed(futures):
-                host, signing, webclient, problem = future.result()
+                host, signing, webclient, ldap_policy, problem = future.result()
                 for entry in computers[host.casefold()]:
                     entry["daclgraphSmbSigningRequired"] = signing
                     entry["daclgraphWebClientRunning"] = webclient
+                    if ldap_policy is not None:
+                        integrity = ldap_policy["ldapServerIntegrity"]
+                        enforcement = ldap_policy["ldapServerEnforceIntegrity"]
+                        entry["daclgraphLdapServerSigningRequired"] = (
+                            True if enforcement == 1
+                            else integrity == 2 if integrity in (0, 2)
+                            else None
+                        )
+                        entry["daclgraphLdapServerIntegrity"] = integrity
+                        entry["daclgraphLdapServerEnforceIntegrity"] = enforcement
+                        entry["daclgraphLdapEnforceChannelBinding"] = ldap_policy["ldapEnforceChannelBinding"]
                 if problem:
                     print(f"[i] {host}: {problem}", file=sys.stderr)
     finally:
@@ -579,6 +658,10 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                       "operatingSystemVersion": scalar(attr(entry, "operatingSystemVersion")),
                       "smbSigningRequired": entry.get("daclgraphSmbSigningRequired"),
                       "webClientRunning": entry.get("daclgraphWebClientRunning"),
+                        "ldapServerSigningRequired": entry.get("daclgraphLdapServerSigningRequired"),
+                        "ldapServerIntegrity": entry.get("daclgraphLdapServerIntegrity"),
+                        "ldapServerEnforceIntegrity": entry.get("daclgraphLdapServerEnforceIntegrity"),
+                        "ldapEnforceChannelBinding": entry.get("daclgraphLdapEnforceChannelBinding"),
                       "isGmsa": kind == "user" and "msds-groupmanagedserviceaccount" in {scalar(value).casefold() for value in (attr(entry, "objectClass", []) or []) if scalar(value)},
                       "homeDirectory": scalar(attr(entry, "homeDirectory")),
                       "whenCreated": scalar(attr(entry, "whenCreated")),
