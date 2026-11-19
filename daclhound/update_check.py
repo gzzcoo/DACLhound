@@ -15,9 +15,8 @@ from pathlib import Path
 from typing import Any
 
 
-_PYPI_JSON_URL = "https://pypi.org/pypi/DACLhound/json"
+_PYPI_JSON_URL = "https://pypi.org/pypi/daclhound/json"
 _CHECK_INTERVAL = 24 * 60 * 60
-_REMIND_INTERVAL = 24 * 60 * 60
 
 
 def _cache_file() -> Path:
@@ -130,7 +129,7 @@ def _read_key() -> str:
 
 
 def _choose_action(version: str, current: str) -> str:
-    choices = ("Install now", "Remind me later")
+    choices = ("Update now", "Skip", "Skip until next version")
     selected = 0
     print(f"A new DACLhound version is available: {version} (installed: {current})")
     print("Use the arrow keys and press Enter:")
@@ -157,10 +156,10 @@ def _choose_action(version: str, current: str) -> str:
             break
         else:
             continue
-        sys.stdout.write("\x1b[1A")
+        sys.stdout.write(f"\x1b[{len(choices) - 1}A")
         render()
     print()
-    return "install" if selected == 0 else "later"
+    return ("install", "skip", "skip_until_next_version")[selected]
 
 
 def _install_command() -> list[str]:
@@ -204,13 +203,17 @@ def maybe_prompt_for_update(current_version: str) -> None:
     if (cache.get("remind_for_version") == latest and isinstance(remind_until, (int, float))
             and remind_until > now):
         return
+    if cache.get("skip_until_version") == latest:
+        return
 
     try:
         action = _choose_action(latest, current_version)
     except (OSError, ValueError):
         return
-    if action == "later":
-        cache.update(remind_for_version=latest, remind_until=now + _REMIND_INTERVAL)
+    if action == "skip":
+        return
+    if action == "skip_until_next_version":
+        cache.update(skip_until_version=latest, remind_for_version=None, remind_until=0)
         _write_cache(cache)
         return
 
@@ -222,7 +225,7 @@ def maybe_prompt_for_update(current_version: str) -> None:
         print(f"Could not start the updater: {exc}", file=sys.stderr)
         return
     if result.returncode == 0:
-        cache.update(remind_for_version=None, remind_until=0)
+        cache.update(skip_until_version=None, remind_for_version=None, remind_until=0)
         _write_cache(cache)
         print(f"DACLhound {latest} installed.")
         print("Restarting DACLhound with the updated version...")

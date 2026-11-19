@@ -22,7 +22,7 @@ pipx install DACLhound
 
 Upgrade with `pipx upgrade DACLhound`.
 
-When a newer release is available, the CLI can offer to install it at startup. Choose **Remind me later** to defer the prompt for 24 hours. The update check runs only in an interactive terminal; set `DACLHOUND_NO_UPDATE_CHECK=1` to disable it.
+When a newer release is available, the CLI can offer to install it at startup. Choose **Skip** to dismiss the prompt for this run, or **Skip until next version** to hide it until a newer release is published. The update check runs only in an interactive terminal; set `DACLHOUND_NO_UPDATE_CHECK=1` to disable it.
 
 ## Collect
 
