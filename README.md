@@ -4,6 +4,10 @@ DACLhound collects and analyzes Active Directory permissions over LDAP or native
 
 Unlike BloodHound CE's modeled graph edges, DACLhound preserves the collected DACL details and exposes individual `Write-Property` rights by attribute (for example, `WriteLogonHours` or `WriteUAC`). This helps inspect the specific property and ACE behind a relationship.
 
+## 📚 Full Wiki & Documentation
+
+Read the step-by-step [DACLhound Wiki](https://github.com/gzzcoo/DACLhound/wiki) for the Viewer, graph navigation, pathfinding, queries, and optional SCCM/MECM inventory. The guide includes screenshots and explains what the collected relationships mean.
+
 ![DACLhound graph example](https://raw.githubusercontent.com/gzzcoo/DACLhound/main/DACLhound/daclhound.png)
 
 https://github.com/user-attachments/assets/d691098f-426c-4c34-ae8d-40e148de3154
