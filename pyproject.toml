@@ -7,10 +7,10 @@ name = "DACLhound"
 version = "0.1.39"
 description = "Collect Active Directory DACLs and explore them in an interactive graph"
 readme = "README.md"
-license = "MIT"
+license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["bloodyAD==2.5.5", "impacket==0.13.1"]
+dependencies = ["bloodyAD==2.5.5", "dnspython>=2.4.2", "impacket==0.13.1"]
 keywords = ["active-directory", "acl", "dacl", "bloodhound", "security"]
 classifiers = [
   "Development Status :: 3 - Alpha",

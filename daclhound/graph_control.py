@@ -77,7 +77,7 @@ def _start_graph_server(bind: str, port: int, input_path: str | None, verbose: b
         raise RuntimeError(f"Could not start the graph server on {bind}:{port}; check whether the port is already in use")
     pid_file.write_text(json.dumps({"pid": process.pid, "bind": bind, "port": port}) + "\n", encoding="utf-8")
     print(f"[+] DACLhound graph started at http://{bind}:{port}/ (PID {process.pid})")
-    print("[+] Stop it with: DACLhound.py graph stop")
+    print("[+] Stop it with: daclhound graph stop")
     return 0
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -28,7 +29,10 @@ from .graph_control import (
     _start_graph_server,
     _stop_graph_server,
 )
+from .json_export import ANALYSIS_ONLY_NOTICE, split_graph_json_to_zip
 from .server import run_server
+from .sccm import print_sccm_summary, profile_sccm_smb, resolve_sccm_hosts
+from .update_check import maybe_prompt_for_update
 
 
 def _paint(text: str, *codes: str, stream: Any = sys.stdout) -> str:
@@ -45,7 +49,9 @@ def _print_banner() -> None:
     print(flush=True)
 
 
-def _print_collection_summary(dataset: dict[str, Any], output: Path) -> None:
+def _print_collection_summary(
+    dataset: dict[str, Any], output: Path, sccm_report: dict[str, Any] | None = None,
+) -> None:
     nodes = dataset.get("nodes", [])
     type_labels = (
         ("user", "users"), ("group", "groups"), ("computer", "computers"),
@@ -69,6 +75,8 @@ def _print_collection_summary(dataset: dict[str, Any], output: Path) -> None:
     quota = stats.get("machineAccountQuota")
     quota_display = quota if quota not in (None, "") else "not collected"
     print(f"{_paint('[+]', '1', '32')} MachineAccountQuota: {quota_display}")
+    if sccm_report is not None:
+        print_sccm_summary(sccm_report)
     print(f"{_paint('[+]', '1', '32')} Graph: {output}")
 
 
@@ -128,6 +136,9 @@ def _resolve_output_paths(
 
 
 def main() -> int:
+    if ("--_daemon-child" not in sys.argv
+            and not any(arg in {"-h", "--help", "--version"} for arg in sys.argv[1:])):
+        maybe_prompt_for_update(__version__)
     if "--_daemon-child" not in sys.argv:
         _print_banner()
     parser = argparse.ArgumentParser(
@@ -166,8 +177,10 @@ def main() -> int:
     collection.add_argument("--no-adcs", action="store_true", help="Skip native ADCS ESC collection (enabled by default)")
     collection.add_argument("--host-checks", action="store_true",
                             help="Check SMB signing/WebClient on computers and LDAP relay policy on domain controllers")
-    collection.add_argument("--host-check-timeout", type=int, default=5, metavar="SECONDS",
-                            help="Per-computer host-check timeout when --host-checks is enabled (default: 5)")
+    collection.add_argument("--sccm", action="store_true",
+                            help="Optionally discover SCCM/MECM assets over LDAP, resolve them via the DC DNS, and profile SMB shares")
+    collection.add_argument("--host-check-timeout", type=int, default=15, metavar="SECONDS",
+                            help="Per-computer timeout shared by --host-checks and --sccm (default: 15)")
 
     output = ap.add_argument_group("output")
     output.add_argument("-o", "--output", help="Custom path for normalized graph JSON (default: DOMAIN.json)")
@@ -210,14 +223,46 @@ def main() -> int:
                          help="Maximum relationships/paths to print; 0 prints all (default: 0)")
     analyze.add_argument("--color", choices=("never",), default="always",
                          help="Disable ANSI colors (colors are enabled by default)")
+    json_command = commands.add_parser(
+        "json", help="Organize a unified graph JSON for manual inspection (not for the viewer)",
+        description="Create object-type JSON files and a shared edges.json in an analysis-only ZIP archive. "
+                    "This archive is not a viewer input; use the original unified JSON with 'daclhound graph'.",
+    )
+    json_commands = json_command.add_subparsers(dest="json_action", required=True)
+    split_json = json_commands.add_parser(
+        "split", help="Split a unified graph JSON into per-type files in an analysis-only ZIP",
+        description=ANALYSIS_ONLY_NOTICE,
+    )
+    split_json.add_argument("--input", required=True, metavar="JSON",
+                            help="Unified DACLhound graph JSON to organize")
+    split_json.add_argument("-z", "--zip", required=True, dest="zip_path", metavar="FILE",
+                            help="Output analysis ZIP (not accepted by the graph viewer)")
     ns = parser.parse_args()
     if ns.command == "collect" and ns.host_check_timeout < 1:
         ap.error("--host-check-timeout must be at least 1 second")
+    sccm_dns_server = ""
+    if ns.command == "collect" and ns.sccm:
+        if ns.from_raw:
+            ap.error("--sccm requires a live LDAP collection and cannot be combined with --from-raw")
+        if ns.transport == "adws":
+            ap.error("--sccm requires LDAP and cannot be combined with --transport adws")
+        sccm_dns_server = ns.dns_server or ns.dc_ip or ns.host
+        try:
+            ipaddress.ip_address(sccm_dns_server)
+        except ValueError:
+            ap.error("--sccm needs a DNS server IP; provide --dns-server or --dc-ip when -H is a hostname")
 
     if ns.command == "analyze":
         if ns.limit < 0:
             analyze.error("--limit cannot be negative")
         return analyze_graph_files(ns.json_files, ns.from_user, ns.limit, ns.color)
+
+    if ns.command == "json":
+        object_count, type_count, edge_count = split_graph_json_to_zip(ns.input, ns.zip_path)
+        print(f"[+] Analysis ZIP created: {ns.zip_path}")
+        print(f"[+] Objects: {object_count:,} across {type_count:,} object types | Relationships: {edge_count:,}")
+        print(f"[!] {ANALYSIS_ONLY_NOTICE}")
+        return 0
 
     if ns.command == "graph":
         if ns.action == "start":
@@ -318,6 +363,7 @@ def main() -> int:
              "userAccountControl,msDS-AllowedToDelegateTo,msDS-AllowedToActOnBehalfOfOtherIdentity,msDS-GroupMSAMembership,"
              "servicePrincipalName,dNSHostName,adminCount,trustPartner,trustDirection,trustType,trustAttributes,securityIdentifier,scriptPath,operatingSystem,operatingSystemVersion")
     raw_entries: list[dict[str, Any]] = []
+    sccm_report: dict[str, Any] | None = {} if ns.sccm else None
     used_adws = False
     if ns.from_raw:
         try:
@@ -379,6 +425,7 @@ def main() -> int:
                     requested_objects, type_map, attrs, ns.timeout, ns.dc_ip, include_adcs,
                     ns.secure, kerberos_enabled,
                     "aes" if ns.aes_key else "rc4" if ns.nt_hash and kerberos_enabled else "",
+                    sccm_report,
                 ))
             except Exception as exc:
                 network_failure = any(token in str(exc).casefold() for token in (
@@ -404,6 +451,18 @@ def main() -> int:
     for e in raw_entries:
         unique[stable_id(e) or json.dumps(e, sort_keys=True)] = e
     raw_entries = list(unique.values())
+    if sccm_report is not None:
+        if used_adws:
+            raise RuntimeError("--sccm could not run because LDAP was unavailable and collection fell back to ADWS")
+        sccm_timeout = ns.host_check_timeout
+        resolve_sccm_hosts(sccm_report, sccm_dns_server, timeout=sccm_timeout)
+        profile_sccm_smb(
+            sccm_report, username=ns.username or "", domain=ns.domain,
+            password=ns.password or "", hashes=ns.nt_hash or "", aes_key=ns.aes_key or "",
+            kerberos=kerberos_enabled or bool(ns.aes_key), ccache=kerberos_ticket,
+            kdc_host=ns.dc_ip or ns.host,
+            timeout=sccm_timeout,
+        )
     if ns.host_checks:
         collect_host_service_checks(
             raw_entries, username=ns.username or "", domain=ns.domain,
@@ -413,14 +472,14 @@ def main() -> int:
             timeout=ns.host_check_timeout,
         )
     target_domain = _target_domain(raw_entries, ns.domain)
-    dataset = build_dataset(raw_entries, target_domain, selected)
+    dataset = build_dataset(raw_entries, target_domain, selected, sccm_report)
     out, raw_path = _resolve_output_paths(target_domain, ns.output, ns.raw_output, ns.overwrite)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(dataset, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if raw_path is not None:
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         raw_path.write_text(json.dumps(raw_entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    _print_collection_summary(dataset, out)
+    _print_collection_summary(dataset, out, sccm_report)
     if used_adws:
         print(_status("*", "Need to exploit over ADWS, for example when LDAP is unavailable? SOAPy supports targeted operations such as RBCD, Shadow Credentials, and SPN/UAC writes: https://github.com/logangoins/SOAPy", "1;34"))
     if raw_path:

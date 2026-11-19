@@ -220,6 +220,7 @@ async def collect_with_bloodyad(
     secure: bool = False,
     kerberos: bool = False,
     auth_format: str = "",
+    sccm_report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     patch_badldap_rfc4515_compat()
     from bloodyAD.cli_modules.get import search as bloodyad_search
@@ -315,6 +316,10 @@ async def collect_with_bloodyad(
         # per non-default user instead of including it in the broad subtree
         # searches above (which fail with ERROR_DS_NON_BASE_SEARCH).
         ldap = await conn.getLdap()
+        if sccm_report is not None:
+            from .sccm import discover_sccm
+
+            sccm_report.update(await discover_sccm(ldap))
         token_group_failures = 0
         for entry in entries:
             if classify(entry) != "user":
@@ -562,8 +567,16 @@ def collect_host_service_checks(
                 os.environ["KRB5CCNAME"] = old_ccache
 
 
-def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]) -> dict[str, Any]:
+def build_dataset(
+    entries: list[dict[str, Any]], domain: str, selected: set[str],
+    sccm_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     nodes, edges = [], []
+    sccm_by_host = {
+        scalar(item.get("hostname")).casefold(): item
+        for item in (sccm_report or {}).get("computers", [])
+        if scalar(item.get("hostname"))
+    }
     by_name: dict[str, str] = {}
     entries_by_node_id: dict[str, dict[str, Any]] = {}
     for entry in entries:
@@ -641,6 +654,10 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
         if not isinstance(token_groups_fallback, list):
             token_groups_fallback = [token_groups_fallback]
         token_groups = [*token_groups, *token_groups_fallback]
+        sccm_profile = sccm_by_host.get(scalar(attr(entry, "dNSHostName")).casefold())
+        smb_signing_required = entry.get("daclgraphSmbSigningRequired")
+        if not isinstance(smb_signing_required, bool):
+            smb_signing_required = ((sccm_profile or {}).get("smb") or {}).get("signingRequired")
         nodes.append({"id": node_id, "name": name, "type": kind, "dn": dn,
                       "sid": scalar(entry.get("objectSid")), "owner": scalar(descriptor.get("Owner")),
                       "sidHistory": [sid for value in sid_history
@@ -648,6 +665,7 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                       "control": scalar(descriptor.get("Control")),
                       "memberOf": entry.get("memberOf", []), "members": members,
                       "dNSHostName": scalar(attr(entry, "dNSHostName")),
+                      "sccm": sccm_profile,
                       "primaryGroupID": scalar(entry.get("primaryGroupID")),
                       "tokenGroups": token_groups,
                       "samAccountName": sam, "displayName": display_name,
@@ -656,7 +674,7 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                       "scriptPath": scalar(attr(entry, "scriptPath")),
                       "operatingSystem": scalar(attr(entry, "operatingSystem")),
                       "operatingSystemVersion": scalar(attr(entry, "operatingSystemVersion")),
-                      "smbSigningRequired": entry.get("daclgraphSmbSigningRequired"),
+                      "smbSigningRequired": smb_signing_required,
                       "webClientRunning": entry.get("daclgraphWebClientRunning"),
                         "ldapServerSigningRequired": entry.get("daclgraphLdapServerSigningRequired"),
                         "ldapServerIntegrity": entry.get("daclgraphLdapServerIntegrity"),
@@ -1049,11 +1067,392 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
         add_adcs_findings(entries, nodes, edges, object_ids, domain)
     adcs_entries_present = any(entry.get("__daclgraph_adcs_kind") for entry in entries)
     adcs_report = adcs_assessment(entries, edges) if adcs_entries_present else []
+    if sccm_report is not None:
+        # SCCM inventory is visual context, not an AD attack-path relationship.
+        # Represent each discovered Configuration Manager site as its own node
+        # and connect it only to computer objects already present in this graph.
+        computers_by_host = {
+            scalar(node.get("dNSHostName")).strip().rstrip(".").casefold(): node
+            for node in nodes if node.get("type") == "computer" and node.get("dNSHostName")
+        }
+        sites_by_code: dict[str, dict[str, Any]] = {}
+        sccm_nodes: dict[str, dict[str, Any]] = {}
+        for site in sccm_report.get("sites", []):
+            code = scalar(site.get("siteCode")).strip()
+            site_name = scalar(site.get("name")).strip()
+            identity = code or site_name or scalar(site.get("dn"))
+            if not identity:
+                continue
+            normalized = identity.casefold()
+            node_id = f"sccm-site::{domain.casefold()}::{re.sub(r'[^a-z0-9]+', '-', normalized).strip('-')}"
+            node = {"id": node_id, "name": code or site_name or "Unknown Site",
+                    "type": "sccm_site", "domain": domain, "dn": scalar(site.get("dn")),
+                    "sccm": {"siteCode": code, "siteName": site_name,
+                             "managementPoints": [], "potentialDistributionPoints": [],
+                             "serverRoles": [],
+                             "principalCount": len(sccm_report.get("principals", []))}}
+            nodes.append(node)
+            sccm_nodes[normalized] = node
+            if code:
+                sites_by_code[code.casefold()] = node
+
+        def add_sccm_inventory_edge(site_node: dict[str, Any], host: str, role: str) -> None:
+            computer = computers_by_host.get(host.strip().rstrip(".").casefold())
+            if not computer:
+                return
+            if role == "Management Point":
+                if computer["name"] not in site_node["sccm"]["managementPoints"]:
+                    site_node["sccm"]["managementPoints"].append(computer["name"])
+            elif role == "Potential PXE DP":
+                if computer["name"] not in site_node["sccm"]["potentialDistributionPoints"]:
+                    site_node["sccm"]["potentialDistributionPoints"].append(computer["name"])
+            else:
+                record = {"hostname": computer["name"], "role": role}
+                if record not in site_node["sccm"]["serverRoles"]:
+                    site_node["sccm"]["serverRoles"].append(record)
+            edge = next((item for item in edges
+                         if item.get("kind") == "sccm_inventory"
+                         and item.get("source") == site_node["id"]
+                         and item.get("target") == computer["id"]), None)
+            if edge is None:
+                edge = {"id": f"sccm-inventory::{site_node['id']}::{computer['id']}",
+                        "kind": "sccm_inventory", "source": site_node["id"],
+                        "target": computer["id"], "sourceName": site_node["name"],
+                        "sourceType": "sccm_site", "targetName": computer["name"],
+                        "targetType": "computer", "roles": [],
+                        "isACL": False, "traversable": False}
+                edges.append(edge)
+            if role not in edge["roles"]:
+                edge["roles"].append(role)
+                edge["roles"].sort(key=str.casefold)
+            edge["right"] = f"SCCM roles ({len(edge['roles'])})"
+            edge["relationship"] = edge["right"]
+
+        for point in sccm_report.get("managementPoints", []):
+            site_node = sites_by_code.get(scalar(point.get("siteCode")).strip().casefold())
+            if site_node:
+                add_sccm_inventory_edge(site_node, scalar(point.get("hostname")), "Management Point")
+        # LDAP's PXE connectionPoint evidence is not site-scoped. Only associate
+        # it with a site when the domain has exactly one discovered site.
+        discovered_sites = list(sccm_nodes.values())
+        if len(discovered_sites) == 1:
+            for point in sccm_report.get("potentialDistributionPoints", []):
+                add_sccm_inventory_edge(discovered_sites[0], scalar(point.get("hostname")),
+                                        "Potential PXE DP")
+        for item in sccm_report.get("computers", []):
+            smb = item.get("smb", {})
+            tcp = item.get("tcpIndicators", {})
+            roles = {scalar(role).strip().casefold().replace("_", "-")
+                     for role in [*(item.get("ldapRoles") or []), *(smb.get("roles") or [])]}
+            site_codes = {scalar(code).strip().casefold()
+                          for code in [*(item.get("ldapSiteCodes") or []), *(smb.get("siteCodes") or [])]
+                          if scalar(code).strip()}
+            matched_sites = {sites_by_code[code]["id"]: sites_by_code[code]
+                             for code in site_codes if code in sites_by_code}
+            full_control_site_candidate = "system management full control" in roles
+            if not matched_sites and len(discovered_sites) == 1 and (roles or full_control_site_candidate):
+                matched_sites[discovered_sites[0]["id"]] = discovered_sites[0]
+            state = scalar(item.get("siteServerConfiguration") or item.get("siteServerState")
+                           or item.get("configuration") or smb.get("siteServerConfiguration")).strip().casefold()
+            server_roles = []
+            site_server_state = scalar(item.get("siteServerConfiguration") or item.get("siteServerState")
+                                       or item.get("configuration") or smb.get("siteServerConfiguration"))
+            inferred_site_server = site_server_state.casefold() in {"active", "passive"}
+            if ("site-server" in roles or item.get("siteServer") is True
+                    or full_control_site_candidate or inferred_site_server):
+                smb_authenticated = smb.get("status") == "authenticated"
+                state_label = ("Passive · inferred" if "passive" in state and "site-share" in scalar(item.get("siteServerDetection")).casefold() else
+                               "Passive" if "passive" in state else
+                               "Active" if "active" in state and "inactive" not in state else
+                               "Active" if smb_authenticated and "site-server" in roles else
+                               "Passive" if smb_authenticated and full_control_site_candidate else
+                               "state unknown")
+                server_roles.append(f"Site Server · {state_label}")
+            if "sms-provider" in roles or item.get("smsProvider") is True:
+                server_roles.append("SMS Provider")
+            if "distribution-point" in roles:
+                server_roles.append("Distribution Point")
+            if "wsus" in roles or item.get("wsus") is True or tcp.get("wsus8530") or tcp.get("wsus8531"):
+                server_roles.append("WSUS")
+            if tcp.get("mssql1433") and roles:
+                server_roles.append("MSSQL (1433)")
+            for site_node in matched_sites.values():
+                for role in server_roles:
+                    add_sccm_inventory_edge(site_node, scalar(item.get("hostname")), role)
+
+        # Model takeover routes as edges between the SCCM machine account and
+        # the concrete service target. The service nodes are distinct from the
+        # AD computer objects that host them.
+        report_computers = sccm_report.get("computers", [])
+        site_codes = {scalar(site.get("siteCode")).strip().casefold(): site
+                      for site in sccm_report.get("sites", []) if scalar(site.get("siteCode")).strip()}
+
+        def normalize_host(value: Any) -> str:
+            return scalar(value).strip().rstrip(".").casefold()
+
+        def report_computer(hostname: str) -> dict[str, Any] | None:
+            wanted = normalize_host(hostname)
+            exact = next((item for item in report_computers
+                          if normalize_host(item.get("hostname")) == wanted), None)
+            if exact or "." in wanted:
+                return exact
+            matches = [item for item in report_computers
+                       if normalize_host(item.get("hostname")).split(".", 1)[0] == wanted]
+            return matches[0] if len(matches) == 1 else None
+
+        def graph_computer(hostname: str) -> dict[str, Any] | None:
+            wanted = normalize_host(hostname)
+            exact = computers_by_host.get(wanted)
+            if exact or "." in wanted:
+                return exact
+            matches = [node for fqdn, node in computers_by_host.items()
+                       if fqdn.split(".", 1)[0] == wanted]
+            return matches[0] if len(matches) == 1 else None
+
+        def item_site_codes(item: dict[str, Any]) -> set[str]:
+            smb = item.get("smb") or {}
+            return {normalize_host(value) for value in
+                    [*(item.get("ldapSiteCodes") or []), *(smb.get("siteCodes") or [])] if normalize_host(value)}
+
+        def sites_for(item: dict[str, Any], fallback_codes: list[str] | None = None) -> list[dict[str, Any]]:
+            codes = {normalize_host(code) for code in (fallback_codes or []) if normalize_host(code)}
+            codes.update(item_site_codes(item))
+            matched = [site for code, site in site_codes.items() if code in codes]
+            if not matched and len(site_codes) == 1:
+                matched = [next(iter(site_codes.values()))]
+            return matched
+
+        def active_site_servers(site: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+            code = normalize_host(site.get("siteCode"))
+            active = []
+            for item in report_computers:
+                smb = item.get("smb") or {}
+                roles = {normalize_host(role).replace("_", "-")
+                         for role in [*(item.get("ldapRoles") or []), *(smb.get("roles") or [])]}
+                state = normalize_host(item.get("siteServerConfiguration") or smb.get("siteServerConfiguration"))
+                is_active = state == "active" or (
+                    state != "passive" and "site-server" in roles
+                    and smb.get("status") == "authenticated"
+                )
+                item_codes = item_site_codes(item)
+                if not is_active or (item_codes and code and code not in item_codes):
+                    continue
+                node = graph_computer(scalar(item.get("hostname")))
+                if node:
+                    active.append((item, node))
+            return active
+
+        def add_sccm_host_edge(service_node: dict[str, Any], host_node: dict[str, Any], role: str) -> None:
+            edges.append({"id": f"sccm-host::{service_node['id']}::{host_node['id']}",
+                          "kind": "sccm_host", "source": service_node["id"],
+                          "target": host_node["id"], "sourceName": service_node["name"],
+                          "sourceType": service_node["type"], "targetName": host_node["name"],
+                          "targetType": "computer", "relationship": "Hosted on",
+                          "role": role, "isACL": False, "traversable": False})
+
+        def add_sccm_attack_edge(source: dict[str, Any], target: dict[str, Any], attack_type: str,
+                                 requirements: list[str], evidence: list[str], *,
+                                 status: str = "conditional", traversable: bool = True) -> None:
+            edges.append({"id": f"sccm-attack::{attack_type}::{source['id']}::{target['id']}",
+                          "kind": "sccm_attack", "attackType": attack_type,
+                          "source": source["id"], "target": target["id"],
+                          "sourceName": source["name"], "sourceType": source["type"],
+                          "targetName": target["name"], "targetType": target["type"],
+                          "requirements": requirements, "evidence": evidence,
+                          "status": status, "isACL": False, "traversable": traversable})
+
+        database_nodes: dict[tuple[str, str], dict[str, Any]] = {}
+        for database in sccm_report.get("siteDatabases", []):
+            hostname = scalar(database.get("hostname")).strip().rstrip(".")
+            if not hostname:
+                continue
+            source_item = next((item for item in report_computers
+                                if normalize_host(item.get("hostname")) == normalize_host(database.get("siteServer"))), None)
+            target_item = report_computer(hostname)
+            hostname = scalar((target_item or {}).get("hostname") or hostname).strip().rstrip(".")
+            target_computer = graph_computer(hostname)
+            for site in sites_for(source_item or {}, database.get("siteCodes")):
+                site_code = scalar(site.get("siteCode")).strip()
+                key = (site_code.casefold(), hostname.casefold())
+                database_node = database_nodes.get(key)
+                if database_node is None:
+                    target_smb = (target_item or {}).get("smb") or {}
+                    target_tcp = (target_item or {}).get("tcpIndicators") or {}
+                    discovery = database.get("discovery", "SCCM profiling")
+                    inferred_database = str(discovery).startswith("TCP/1433 fallback")
+                    database_node = {
+                        "id": f"sccm-database::{domain.casefold()}::{site_code.casefold()}::{hostname.casefold()}",
+                        "name": f"{'Potential Site Database' if inferred_database else 'Site Database'} · {hostname}",
+                        "type": "sccm_database", "domain": domain,
+                        "sccm": {"role": "Potential Site Database", "siteCode": site_code,
+                                 "hostname": hostname, "discovery": discovery,
+                                 "mssqlReachable": target_tcp.get("mssql1433"),
+                                 "smbSigningRequired": target_smb.get("signingRequired"),
+                                 "smbStatus": target_smb.get("status", "not-profiled")},
+                    }
+                    nodes.append(database_node)
+                    database_nodes[key] = database_node
+                    target_site = sites_by_code.get(site_code.casefold())
+                    if target_site:
+                        target_site["sccm"].setdefault("siteDatabases", []).append(hostname)
+                    if target_computer:
+                        add_sccm_host_edge(database_node, target_computer, "MSSQL site database")
+                for source_item_active, source_node in active_site_servers(site):
+                    if normalize_host(hostname) == normalize_host(source_item_active.get("hostname")):
+                        continue
+                    requirements = [
+                        "The primary MSSQL site database must run on a server separate from the Primary Site Server.",
+                        "The Primary Site Server computer account must be a member of the site database server's local Administrators group.",
+                        "The Primary Site Server must be coercible into authenticating to the relay.",
+                    ]
+                    primary_host = scalar(source_item_active.get("hostname") or database.get("siteServer")).strip().rstrip(".")
+                    evidence = [
+                        f"The Primary Site Server ({primary_host}) and potential MSSQL site database host ({hostname}) are different systems.",
+                        (f"Potential site database candidate inferred from TCP/1433 and SCCM site association; Remote Registry query {database.get('registryStatus', 'unavailable')}."
+                         if str(database.get("discovery", "")).startswith("TCP/1433 fallback")
+                         else f"Remote Registry candidate on {database.get('siteServer')}: {database.get('discovery', 'SCCM profiling')}."),
+                    ]
+                    target_smb = (target_item or {}).get("smb") or {}
+                    target_tcp = (target_item or {}).get("tcpIndicators") or {}
+                    if (target_smb.get("signingRequired") is False
+                            and target_smb.get("status") in {"authenticated", "authentication-failed"}):
+                        add_sccm_attack_edge(
+                            source_node, database_node, "CoerceAndRelayToSMB",
+                            requirements + ["For the SMB route, SMB must be reachable on the database server and SMB signing must not be required."],
+                            evidence + ["SMB signing is not required on the target."])
+                    if target_tcp.get("mssql1433") is True:
+                        add_sccm_attack_edge(
+                            source_node, database_node, "CoerceAndRelayToMSSQL",
+                            requirements + ["For the MSSQL route, TCP/1433 must be reachable on the separate database server."],
+                            evidence + ["TCP/1433 is reachable on the target."])
+
+        provider_nodes: dict[str, dict[str, Any]] = {}
+        for provider in sccm_report.get("smsProviders", []):
+            hostname = scalar(provider.get("hostname")).strip().rstrip(".")
+            if not hostname:
+                continue
+            target_item = report_computer(hostname)
+            target_computer = graph_computer(hostname)
+            for site in sites_for(target_item or {}):
+                site_code = scalar(site.get("siteCode")).strip()
+                key = f"{site_code.casefold()}::{hostname.casefold()}"
+                provider_node = provider_nodes.get(key)
+                if provider_node is None:
+                    provider_node = {
+                        "id": f"sccm-provider::{domain.casefold()}::{key}",
+                        "name": f"SMS Provider · {hostname}", "type": "sccm_provider", "domain": domain,
+                        "sccm": {"role": "SMS Provider", "siteCode": site_code,
+                                 "hostname": hostname, "endpoint": provider.get("endpoint", ""),
+                                 "statusCode": provider.get("statusCode"),
+                                 "authSchemes": provider.get("authSchemes", []),
+                                 "ntlmSupported": provider.get("ntlmSupported") is True,
+                                 "ntlmAdvertised": provider.get("ntlmAdvertised") is True},
+                    }
+                    nodes.append(provider_node)
+                    provider_nodes[key] = provider_node
+                    target_site = sites_by_code.get(site_code.casefold())
+                    if target_site:
+                        target_site["sccm"].setdefault("smsProviders", []).append(hostname)
+                    if target_computer:
+                        add_sccm_host_edge(provider_node, target_computer, "SMS Provider AdminService")
+                if provider.get("ntlmSupported") is not True:
+                    continue
+                for source_item, source_node in active_site_servers(site):
+                    if source_node["id"] == (target_computer or {}).get("id"):
+                        continue
+                    add_sccm_attack_edge(
+                        source_node, provider_node, "CoerceAndRelayToSMSProvider",
+                        ["The AdminService HTTP API must be reachable on the SMS Provider server.",
+                         "The AdminService API must accept NTLM authentication; Configuration Manager 2509 and later reject NTLM and break this relay path.",
+                         "The Primary Site Server computer account must have SMS Admins permissions to add a site administrator through the SMS_Admin API/WMI class.",
+                         "The site Management Point and SMS Provider server names or addresses must be known.",
+                         "The primary site server must be coercible into authenticating to the relay."],
+                        [f"AdminService endpoint on SMS Provider {hostname}: {provider.get('endpoint', 'unknown')}.",
+                         f"HTTP status: {provider.get('statusCode', 'unknown')}; offered schemes: {', '.join(provider.get('authSchemes') or []) or 'not reported'}.",
+                         ("NTLM was explicitly advertised by the endpoint."
+                          if provider.get("ntlmAdvertised") else
+                          "Negotiate was advertised; AdminService can negotiate NTLM before Configuration Manager 2509."),
+                         "Relay target resource: /AdminService/wmi/SMS_Admin.",
+                         *(f"Site Management Point: {scalar(point.get('hostname'))}."
+                           for point in sccm_report.get("managementPoints", [])
+                           if normalize_host(point.get("siteCode")) == normalize_host(site.get("siteCode"))
+                           and scalar(point.get("hostname")).strip())])
+
+        passive_servers = []
+        for item in report_computers:
+            smb = item.get("smb") or {}
+            state = normalize_host(item.get("siteServerConfiguration") or smb.get("siteServerConfiguration"))
+            if state == "passive":
+                node = graph_computer(scalar(item.get("hostname")))
+                if node and smb.get("status") in {"authenticated", "authentication-failed"}:
+                    passive_servers.append((item, node))
+        for site in sccm_report.get("sites", []):
+            for passive_item, passive_node in passive_servers:
+                passive_codes = item_site_codes(passive_item)
+                site_code = normalize_host(site.get("siteCode"))
+                if passive_codes and site_code and site_code not in passive_codes:
+                    continue
+                for _, active_node in active_site_servers(site):
+                    active_item = report_computer(scalar(active_node.get("dNSHostName") or active_node.get("name"))) or {}
+                    active_smb = active_item.get("smb") or {}
+                    if passive_node["id"] == active_node["id"]:
+                        continue
+                    signing_required = active_smb.get("signingRequired")
+                    signing_status = ("conditional" if signing_required is False else
+                                      "blocked" if signing_required is True else "unknown")
+                    passive_detection = scalar(passive_item.get("siteServerDetection"))
+                    evidence = [f"Passive site server: {scalar(passive_item.get('hostname'))}.",
+                                f"Active site server: {scalar(active_item.get('hostname') or active_node.get('dNSHostName') or active_node.get('name'))}.",
+                                f"Both servers are associated with site {scalar(site.get('siteCode')) or 'unknown'}.",
+                                (f"Passive-server evidence: {passive_detection}." if passive_detection else
+                                 "Passive site-server status was collected from SMB shares or System Management rights."),
+                                ("SMB signing is not required on the active site server."
+                                 if signing_required is False else
+                                 "SMB signing is currently required on the active site server; this blocks the relay prerequisite."
+                                 if signing_required is True else
+                                 "SMB signing requirement on the active site server could not be determined.")]
+                    add_sccm_attack_edge(
+                        passive_node, active_node, "CoerceAndRelayPassiveToActiveServer",
+                        ["A passive site server must be present and reachable.",
+                         "The NetBIOS name, FQDN, or IP address of both the passive and active site servers must be known.",
+                         "SMB signing must not be required on the active site server.",
+                         "The passive server must be coercible into authenticating to the relay."],
+                        evidence, status=signing_status, traversable=signing_required is not True)
     machine_account_quota = next((scalar(attr(entry, "ms-DS-MachineAccountQuota"))
                                   for entry in entries
                                   if classify(entry) == "domain"
                                   and attr(entry, "ms-DS-MachineAccountQuota") is not None), None)
-    return {"schema": "daclgraph/v1", "domain": domain,
+    if sccm_report is not None:
+        # These standard publication ACLs are useful in object details but
+        # redundant as attack-path edges from the SCCM site servers themselves.
+        site_server_accounts = set()
+        for item in sccm_report.get("computers", []):
+            smb = item.get("smb") or {}
+            state = scalar(item.get("siteServerConfiguration")).strip().casefold()
+            roles = {scalar(role).strip().casefold().replace("_", "-")
+                     for role in [*(item.get("ldapRoles") or []), *(smb.get("roles") or [])]}
+            if state not in {"active", "passive"} and "site-server" not in roles:
+                continue
+            hostname = scalar(item.get("hostname")).strip().rstrip(".").casefold()
+            if hostname:
+                short_name = hostname.split(".", 1)[0]
+                site_server_accounts.update({short_name, f"{short_name}$", hostname})
+        node_by_id = {node["id"]: node for node in nodes}
+        for edge in edges:
+            if edge.get("kind") != "dacl":
+                continue
+            target = node_by_id.get(edge.get("target"), {})
+            target_dn = re.sub(r"\s+", "", scalar(target.get("dn"))).casefold()
+            if target.get("type") != "container" or not target_dn.startswith("cn=systemmanagement,cn=system,"):
+                continue
+            rights = {part.strip().upper() for part in re.split(r"[|,;]", scalar(edge.get("right")))
+                      if part.strip()}
+            if "GENERIC_ALL" not in rights:
+                continue
+            trustee = scalar(edge.get("sourceName")).strip().rsplit("\\", 1)[-1].casefold()
+            if trustee in site_server_accounts:
+                edge["sccmPublishingAcl"] = True
+    dataset = {"schema": "daclgraph/v1", "domain": domain,
             "collectedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
             "filters": {"types": sorted(selected)}, "nodes": nodes, "edges": edges,
             "adcsAssessment": adcs_report,
@@ -1066,3 +1465,6 @@ def build_dataset(entries: list[dict[str, Any]], domain: str, selected: set[str]
                                            for e in edges if e.get("kind") == "adcs_esc" or e.get("adcsEsc13")}),
                       "adcsCandidates": sum(item["status"] == "candidate" for item in adcs_report),
                       "adcsRemoteChecks": sum(item["status"] == "requires_remote_check" for item in adcs_report)}}
+    if sccm_report is not None:
+        dataset["sccm"] = sccm_report
+    return dataset
