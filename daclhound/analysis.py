@@ -276,7 +276,7 @@ def _analysis_common_dacl_trustee(value: str) -> bool:
             return False
         if part in common:
             continue
-        if re.fullmatch(r"s-1-5-21-(?:\d+-){3}(?:498|512|513|514|515|516|518|519|520|521|526|527|553)", part):
+        if re.fullmatch(r"s-1-5-21-(?:\d+-){3}(?:498|512|513|514|515|516|517|518|519|520|521|526|527|553)", part):
             continue
         if re.fullmatch(r"s-1-5-(?:18|19|20|32-(?:544|548|549|550|551|552|554|555|556|557|558|559|560|562|568|569|573|574|575|576|577|578|579|580|581|582|583|584|585|586|587|588|589|590|591|592|593|594|595|596|597|598|599))", part):
             continue
@@ -401,6 +401,10 @@ def _render_analysis_report(paths: list[str], from_user: str | None, limit: int,
         ):
             continue
         kind = scalar(edge.get("kind"))
+        if kind == "sql_admin" and scalar(target_node.get("type")).casefold() == "service":
+            # Ignore legacy synthetic targets for MSSQL SPNs whose host did
+            # not resolve to a collected computer.
+            continue
         if kind == "gpo_link" and scalar(edge.get("targetName")).strip().casefold() in {
             "default domain policy", "default domain controllers policy",
         }:

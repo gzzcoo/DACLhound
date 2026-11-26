@@ -832,9 +832,8 @@ def build_dataset(
                           "trustType": trust_node.get("trustType", ""),
                           "trustAttributes": trust_node.get("trustAttributes", ""),
                           "isACL": False, "inherited": False})
-    # Mirror RustHound-CE's SPN-derived SQLAdmin display for user service
-    # accounts. A computer account's own MSSQLSvc SPN does not make that host
-    # an SQL administrator. SQL Server roles are not queried or verified.
+    # Link user MSSQLSvc SPNs only when their host resolves uniquely to a
+    # collected Computer object. This is SPN evidence, not a SQL role check.
     sql_targets: dict[tuple[str, str], dict[str, Any]] = {}
     for principal in nodes:
         if principal["type"] != "user":
@@ -857,15 +856,10 @@ def build_dataset(
             candidates = host_owners.get(host_key, set())
             target_id = next(iter(candidates)) if len(candidates) == 1 else None
             if target_id is None:
-                # Preserve the LDAP evidence when no unique Computer object
-                # can be resolved, rather than linking to the wrong forest.
-                target_id = f"sqlservice::{host_key}"
-                if target_id not in node_by_id:
-                    service_node = {"id": target_id, "name": host, "type": "service", "dn": "",
-                                    "sid": "", "owner": "", "control": "", "memberOf": [],
-                                    "servicePrincipalName": spn}
-                    nodes.append(service_node)
-                    node_by_id[target_id] = service_node
+                # An MSSQLSvc SPN is only an LDAP claim. Do not invent a
+                # computer/service node when its host has no unique Computer
+                # object in this collection; the SPN remains on its account.
+                continue
             key = (principal["id"], target_id)
             item = sql_targets.setdefault(key, {"spns": [], "endpoints": []})
             if spn not in item["spns"]:
